@@ -59,8 +59,9 @@ The extension is **100% ready for Chrome Web Store submission**! Complete packag
 ### 🌐 **Landing Page & Marketing**
 A beautiful, professional landing page is live to promote the extension:
 
-**Live Landing Page**: https://attention-trainer-landing-1phk165xh-harshs-projects-fdd818be.vercel.app  
-**Repository**: https://github.com/Xyerophyte/attention-trainer-landing
+**🌟 Live Landing Page**: https://attention-trainer-landing.vercel.app
+
+> The landing page includes a "GitHub Repository" button that links directly to this source code repository for developers and contributors.
 
 **Features**:
 - 🎨 Stunning animations with Framer Motion

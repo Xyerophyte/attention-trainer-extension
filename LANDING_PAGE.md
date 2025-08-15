@@ -6,8 +6,10 @@ A beautiful, modern landing page built with Next.js 14+ to promote and distribut
 
 ## 🌐 Live Landing Page
 
-**Production URL:** https://attention-trainer-landing-1phk165xh-harshs-projects-fdd818be.vercel.app  
+**Production URL:** https://attention-trainer-landing.vercel.app  
 **GitHub Repository:** https://github.com/Xyerophyte/attention-trainer-landing
+
+> **Source Code Integration**: The landing page includes a "GitHub Repository" button that links directly to this Chrome extension source code repository (https://github.com/Xyerophyte/attention-trainer-extension) for developers and contributors.
 
 ## ✨ Key Features
 
