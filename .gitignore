@@ -29,6 +29,7 @@ out/
 key.pem
 private-key.pem
 chrome-store.zip
+attention-trainer-extension-*.zip
 chrome-store-submission/
 
 # Development files
