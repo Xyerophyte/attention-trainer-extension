@@ -1,0 +1,91 @@
+{
+  "env": {
+    "browser": true,
+    "es2021": true,
+    "node": true,
+    "jest": true,
+    "webextensions": true
+  },
+  "extends": [
+    "eslint:recommended",
+    "plugin:jest/recommended"
+  ],
+  "plugins": [
+    "jest"
+  ],
+  "parserOptions": {
+    "ecmaVersion": 2021,
+    "sourceType": "module"
+  },
+  "globals": {
+    "chrome": "readonly",
+    "testUtils": "readonly",
+    "SharedModules": "readonly",
+    "ConnectionManager": "readonly",
+    "ErrorHandler": "readonly",
+    "FallbackStorage": "readonly",
+    "AttentionTrainerContent": "readonly"
+  },
+  "rules": {
+    // Error Prevention
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
+    "no-undef": "error",
+    "no-redeclare": "error",
+    "no-console": ["warn", { "allow": ["warn", "error"] }],
+    
+    // Code Quality
+    "prefer-const": "error",
+    "no-var": "error",
+    "eqeqeq": ["error", "always"],
+    "curly": ["error", "all"],
+    "brace-style": ["error", "1tbs"],
+    
+    // Best Practices
+    "no-eval": "error",
+    "no-implied-eval": "error",
+    "no-new-func": "error",
+    "no-script-url": "error",
+    "no-alert": "warn",
+    
+    // Chrome Extension Specific
+    "no-restricted-globals": [
+      "error",
+      {
+        "name": "window",
+        "message": "Use globalThis or check for window availability in extensions"
+      }
+    ],
+    
+    // Jest/Testing Rules
+    "jest/no-disabled-tests": "warn",
+    "jest/no-focused-tests": "error",
+    "jest/no-identical-title": "error",
+    "jest/prefer-to-have-length": "warn",
+    "jest/valid-expect": "error",
+    
+    // Performance
+    "no-loop-func": "error",
+    "no-unused-expressions": "error"
+  },
+  "overrides": [
+    {
+      "files": ["src/content/**/*.js"],
+      "rules": {
+        "no-restricted-globals": "off"
+      }
+    },
+    {
+      "files": ["tests/**/*.js"],
+      "rules": {
+        "no-console": "off",
+        "no-unused-vars": ["error", { "argsIgnorePattern": "^_|^mock" }]
+      }
+    },
+    {
+      "files": ["src/background/**/*.js"],
+      "globals": {
+        "importScripts": "readonly"
+      }
+    }
+  ]
+}

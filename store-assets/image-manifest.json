@@ -1,0 +1,61 @@
+{
+  "generated": "2025-08-15T20:15:13.638Z",
+  "promotional_images": [
+    {
+      "file": "small-promo-440x280.png",
+      "dimensions": "440x280",
+      "description": "Small promotional tile",
+      "size_kb": 99
+    },
+    {
+      "file": "large-promo-920x680.png",
+      "dimensions": "920x680",
+      "description": "Large promotional tile",
+      "size_kb": 423
+    },
+    {
+      "file": "marquee-1280x800.png",
+      "dimensions": "1280x800",
+      "description": "Marquee promotional tile",
+      "size_kb": 658
+    }
+  ],
+  "screenshots": [
+    {
+      "file": "screenshot-1-popup-interface.png",
+      "dimensions": "1280x800",
+      "description": "Extension popup interface",
+      "size_kb": 19
+    },
+    {
+      "file": "screenshot-2-analytics-dashboard.png",
+      "dimensions": "1280x800",
+      "description": "Analytics dashboard",
+      "size_kb": 23
+    },
+    {
+      "file": "screenshot-3-intervention-overlay.png",
+      "dimensions": "1280x800",
+      "description": "Intervention overlay in action",
+      "size_kb": 51
+    }
+  ],
+  "requirements": {
+    "promotional_images": {
+      "small_tile": "440x280 PNG",
+      "large_tile": "920x680 PNG",
+      "marquee_tile": "1280x800 PNG"
+    },
+    "screenshots": {
+      "dimensions": "1280x800 PNG",
+      "count": "1-5 images",
+      "purpose": "Show extension functionality"
+    }
+  },
+  "next_steps": [
+    "Review generated images for quality",
+    "Verify file sizes are reasonable (< 1MB each)",
+    "Upload to Chrome Web Store during submission",
+    "Test images display correctly in store listing preview"
+  ]
+}

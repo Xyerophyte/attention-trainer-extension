@@ -1,0 +1,67 @@
+version: 2
+updates:
+  # Enable version updates for npm
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    target-branch: "develop"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "attention-trainer-team"
+    assignees:
+      - "attention-trainer-maintainer"
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "automated"
+    
+    # Security updates
+    allow:
+      - dependency-type: "all"
+    
+    # Ignore specific packages that need manual updates
+    ignore:
+      - dependency-name: "puppeteer"
+        versions: [">=20.0.0"]
+      - dependency-name: "jest"
+        versions: [">=30.0.0"]
+    
+    # Group related updates
+    groups:
+      babel:
+        patterns:
+          - "@babel/*"
+      eslint:
+        patterns:
+          - "eslint*"
+          - "@eslint/*"
+      testing:
+        patterns:
+          - "jest*"
+          - "@jest/*"
+          - "puppeteer*"
+      build-tools:
+        patterns:
+          - "webpack*"
+          - "babel*"
+          - "rollup*"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "github-actions"
+      - "automated"

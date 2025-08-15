@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      width: 1280px; 
+      height: 800px; 
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: white;
+      text-align: center;
+      padding: 40px;
+      position: relative;
+      overflow: hidden;
+    }
+    
+    .background-pattern {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0.1;
+      background-image: repeating-linear-gradient(
+        45deg,
+        transparent,
+        transparent 10px,
+        rgba(255,255,255,0.1) 10px,
+        rgba(255,255,255,0.1) 20px
+      );
+    }
+    
+    .content {
+      position: relative;
+      z-index: 2;
+      max-width: 80%;
+    }
+    
+    .icon {
+      width: 120px;
+      height: 120px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 20px;
+      margin-bottom: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 60px;
+      border: 3px solid rgba(255,255,255,0.3);
+    }
+    
+    .title {
+      font-size: 48px;
+      font-weight: bold;
+      margin-bottom: 15px;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    }
+    
+    .subtitle {
+      font-size: 24px;
+      opacity: 0.9;
+      margin-bottom: 30px;
+      line-height: 1.4;
+    }
+    
+    .features {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 15px;
+      justify-content: center;
+    }
+    
+    .feature {
+      background: rgba(255,255,255,0.2);
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 16px;
+      backdrop-filter: blur(5px);
+    }
+    
+    .chrome-badge {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      font-size: 14px;
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+  <div class="background-pattern"></div>
+  <div class="content">
+    <div class="icon">🎯</div>
+    <div class="title">Attention Trainer</div>
+    <div class="subtitle">Transform your browsing habits with gentle, science-based interventions</div>
+    <div class="features">
+      <div class="feature">Smart Scroll Detection</div><div class="feature">Progressive Interventions</div><div class="feature">Detailed Analytics</div><div class="feature">Three Focus Modes</div><div class="feature">100% Private & Local</div>
+    </div>
+  </div>
+  <div class="chrome-badge">Available for Chrome</div>
+</body>
+</html>

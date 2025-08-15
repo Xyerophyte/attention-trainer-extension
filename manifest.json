@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "Attention Trainer",
+  "version": "1.0.1",
+  "description": "Combat doom scrolling with smart interventions. Track your browsing habits and build better digital focus.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background/background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "Attention Trainer",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "css": ["src/content/content.css"],
+      "js": [
+        "src/shared/error-handler.js",
+        "src/shared/fallback-storage.js",
+        "src/shared/connection-manager.js",
+        "src/shared/index.js",
+        "src/content/content.js"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/dashboard/dashboard.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
