@@ -169,7 +169,7 @@ class AttentionTrainerDashboard {
           <h4 style="margin: 0 0 15px 0; color: #374151;">Interventions by Stage</h4>
           ${total === 0
             ? '<p style="text-align: center; color: #6b7280; margin: 20px 0;">No interventions yet</p>'
-            : Object.entries(stageCounts).map(([stage, count], index) => {
+            : Object.entries(stageCounts).map(([_stage, count], index) => {
               const percentage = total > 0 ? Math.round((count / total) * 100) : 0
               return `
                 <div style="margin: 10px 0; display: flex; align-items: center;">
@@ -279,7 +279,7 @@ class AttentionTrainerDashboard {
     return dates
   }
 
-  async updateTimeRange (days) {
+  async updateTimeRange (_days) {
     // Update charts with new time range
     this.renderStats()
     this.renderCharts()
@@ -309,4 +309,5 @@ class AttentionTrainerDashboard {
 }
 
 // Initialize dashboard
-new AttentionTrainerDashboard()
+const dashboardInstance = new AttentionTrainerDashboard()
+window.attentionTrainerDashboard = dashboardInstance

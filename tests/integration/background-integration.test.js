@@ -452,7 +452,7 @@ describe('Background Script Integration Tests', () => {
     })
 
     it('should migrate storage between versions', async () => {
-      const v0_9_data = {
+      const v09Data = {
         enabled: true,
         mode: 'soft',
         sites: ['youtube.com', 'facebook.com'],
@@ -461,7 +461,7 @@ describe('Background Script Integration Tests', () => {
         }
       }
 
-      mockChrome.storage.local.get.mockResolvedValue(v0_9_data)
+      mockChrome.storage.local.get.mockResolvedValue(v09Data)
       mockChrome.storage.local.set.mockResolvedValue()
 
       const installHandler = installHandlers[0]

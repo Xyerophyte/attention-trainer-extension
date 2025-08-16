@@ -19,8 +19,14 @@
   transition: all 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
-/* Stage 2: Progressive blur */
+/* Global brightness transition applied to html element */
+.attention-trainer-brightness-transition {
+  transition: filter 600ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+/* Stage 2: Progressive blur (reduced intensity, configurable) */
 .attention-trainer-blur {
+  filter: blur(var(--stage2-blur, 0.75px));
   transition: filter 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 

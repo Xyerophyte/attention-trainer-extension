@@ -406,8 +406,8 @@ class FallbackStorage {
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction([this.storeName, this.settingsStore], 'readwrite')
 
-      const clearAnalytics = transaction.objectStore(this.storeName).clear()
-      const clearSettings = transaction.objectStore(this.settingsStore).clear()
+      const _clearAnalytics = transaction.objectStore(this.storeName).clear()
+      const _clearSettings = transaction.objectStore(this.settingsStore).clear()
 
       transaction.oncomplete = () => {
         console.log('🧹 All fallback storage cleared')

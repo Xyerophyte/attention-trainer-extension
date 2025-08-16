@@ -40,6 +40,8 @@ global.window.SharedModules = mockSharedModules
 
 // Remove initialization code from content script for controlled testing
 contentScriptSource = contentScriptSource.replace(/if \(document\.readyState.*[\s\S]*$/, '')
+// Expose class to global scope for tests
+contentScriptSource += "\n;try{globalThis.AttentionTrainerContent = AttentionTrainerContent}catch(_){}\n"
 eval(contentScriptSource)
 
 describe('Content Script Integration Tests', () => {
@@ -70,7 +72,7 @@ describe('Content Script Integration Tests', () => {
     }
 
     // Reset Chrome API mocks
-    chrome.runtime.sendMessage.mockResolvedValue(mockSettings)
+    chrome.runtime.sendMessage.resolves(mockSettings)
     chrome.runtime.id = 'test-extension-id'
 
     // Create fresh instance
@@ -317,7 +319,7 @@ describe('Content Script Integration Tests', () => {
     })
 
     it('should fallback to offline storage when connection fails', async () => {
-      chrome.runtime.sendMessage.mockRejectedValue(new Error('Extension context invalidated'))
+      chrome.runtime.sendMessage.rejects(new Error('Extension context invalidated'))
 
       attentionTrainer.sendBehavioralAnalytics()
 
@@ -360,7 +362,7 @@ describe('Content Script Integration Tests', () => {
         }
       })
 
-      chrome.runtime.sendMessage.mockResolvedValue({
+      chrome.runtime.sendMessage.resolves({
         isEnabled: true,
         focusMode: 'gentle'
       })
@@ -373,7 +375,7 @@ describe('Content Script Integration Tests', () => {
     })
 
     it('should use fallback settings when background is unavailable', async () => {
-      chrome.runtime.sendMessage.mockRejectedValue(new Error('receiving end does not exist'))
+      chrome.runtime.sendMessage.rejects(new Error('receiving end does not exist'))
 
       const trainer = new AttentionTrainerContent()
       await new Promise(resolve => setTimeout(resolve, 200))
@@ -430,7 +432,7 @@ describe('Content Script Integration Tests', () => {
     })
 
     it('should handle settings loading errors gracefully', async () => {
-      chrome.runtime.sendMessage.mockRejectedValue(new Error('Background script error'))
+      chrome.runtime.sendMessage.rejects(new Error('Background script error'))
 
       const trainer = new AttentionTrainerContent()
       await new Promise(resolve => setTimeout(resolve, 200))

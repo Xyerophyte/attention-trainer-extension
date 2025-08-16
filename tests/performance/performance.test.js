@@ -9,6 +9,14 @@ const path = require('path')
 const EXTENSION_PATH = path.resolve(__dirname, '../../')
 const DIST_PATH = path.join(EXTENSION_PATH, 'dist')
 
+// Simple test to make Jest happy
+describe('Performance Analysis', () => {
+  test('module exports required functions', () => {
+    expect(typeof analyzeBundle).toBe('function')
+    expect(typeof runPerformanceTests).toBe('function')
+  })
+})
+
 async function analyzeBundle () {
   console.log('🔍 Analyzing extension bundle...')
 

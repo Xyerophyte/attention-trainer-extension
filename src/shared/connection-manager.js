@@ -1,32 +1,79 @@
 /**
  * Connection Manager - Handles robust connection between content scripts and background service
  * Addresses extension context invalidation and provides fallback mechanisms
+ * Enhanced with circuit breaker patterns, health checks, and graceful degradation
  */
 
 class ConnectionManager {
-  constructor () {
+  constructor (options = {}) {
+    this.options = {
+      maxRetries: options.maxRetries || 5,
+      retryDelay: options.retryDelay || 1000,
+      healthCheckInterval: options.healthCheckInterval || 15000,
+      messageTimeout: options.messageTimeout || 5000,
+      maxQueueSize: options.maxQueueSize || 100,
+      circuitBreakerThreshold: options.circuitBreakerThreshold || 3,
+      circuitBreakerTimeout: options.circuitBreakerTimeout || 30000,
+      gracefulDegradation: options.gracefulDegradation !== false,
+      ...options
+    }
+
     this.isConnected = false
     this.contextValid = true
     this.messageQueue = []
     this.connectionAttempts = 0
-    this.maxRetries = 5
-    this.retryDelay = 1000 // Base delay in ms
     this.healthCheckInterval = null
     this.reconnectTimeout = null
     this.listeners = new Map() // Event listeners for cleanup
 
+    // Circuit breaker state
+    this.circuitBreaker = {
+      failures: 0,
+      lastFailure: 0,
+      isOpen: false,
+      halfOpenAttempts: 0
+    }
+
+    // Health monitoring
+    this.healthMetrics = {
+      lastHealthCheck: 0,
+      consecutiveFailures: 0,
+      averageResponseTime: 0,
+      totalHealthChecks: 0,
+      successfulHealthChecks: 0
+    }
+
+    // Performance metrics
+    this.performanceMetrics = {
+      totalMessages: 0,
+      successfulMessages: 0,
+      failedMessages: 0,
+      averageResponseTime: 0,
+      totalResponseTime: 0
+    }
+
     // Connection state callbacks
     this.onConnectionChange = null
     this.onContextInvalid = null
+    this.onCircuitBreakerOpen = null
+    this.onHealthCheckFail = null
+
+    // Initialize logger if available
+    this.logger = window.logger ? window.logger.child({ component: 'ConnectionManager' }) : null
 
     this.init()
   }
 
   async init () {
+    this.log('info', 'Initializing connection manager')
+    
     await this.validateContext()
     if (this.contextValid) {
       await this.establishConnection()
       this.startHealthCheck()
+      this.startPerformanceMonitoring()
+    } else {
+      this.log('warn', 'Context invalid during initialization')
     }
   }
 
@@ -326,7 +373,7 @@ class ConnectionManager {
   async handleContextInvalidation () {
     // Check if this is just a temporary issue during reload
     const isReload = this.connectionAttempts === 0 && chrome && chrome.runtime
-    
+
     if (isReload) {
       console.info('🔄 Extension context temporarily invalid (likely during reload)')
     } else {
@@ -458,7 +505,314 @@ class ConnectionManager {
   }
 
   /**
-   * Get current connection status
+   * Start performance monitoring
+   */
+  startPerformanceMonitoring() {
+    this.log('info', 'Starting performance monitoring')
+    
+    // Monitor message performance every 60 seconds
+    setInterval(() => {
+      this.reportPerformanceMetrics()
+    }, 60000)
+  }
+
+  /**
+   * Enhanced message sending with circuit breaker
+   */
+  async sendMessageWithCircuitBreaker(message, options = {}) {
+    // Check circuit breaker state
+    if (this.circuitBreaker.isOpen) {
+      const timeSinceFailure = Date.now() - this.circuitBreaker.lastFailure
+      
+      if (timeSinceFailure < this.options.circuitBreakerTimeout) {
+        if (this.options.gracefulDegradation) {
+          this.log('warn', 'Circuit breaker open, using graceful degradation')
+          return this.handleGracefulDegradation(message, options)
+        }
+        throw new Error('Circuit breaker is open')
+      } else {
+        // Try half-open state
+        this.circuitBreaker.isOpen = false
+        this.circuitBreaker.halfOpenAttempts++
+        this.log('info', 'Circuit breaker attempting half-open state')
+      }
+    }
+
+    const startTime = performance.now()
+    
+    try {
+      const result = await this.sendMessage(message, options)
+      
+      // Success - reset circuit breaker
+      if (this.circuitBreaker.failures > 0) {
+        this.circuitBreaker.failures = 0
+        this.circuitBreaker.halfOpenAttempts = 0
+        this.log('info', 'Circuit breaker reset after successful message')
+      }
+      
+      this.updatePerformanceMetrics(startTime, true)
+      return result
+    } catch (error) {
+      this.updatePerformanceMetrics(startTime, false)
+      this.handleCircuitBreakerFailure(error)
+      throw error
+    }
+  }
+
+  /**
+   * Handle circuit breaker failure
+   */
+  handleCircuitBreakerFailure(error) {
+    this.circuitBreaker.failures++
+    this.circuitBreaker.lastFailure = Date.now()
+    
+    if (this.circuitBreaker.failures >= this.options.circuitBreakerThreshold) {
+      this.circuitBreaker.isOpen = true
+      this.log('warn', `Circuit breaker opened after ${this.circuitBreaker.failures} failures`)
+      
+      if (this.onCircuitBreakerOpen) {
+        this.onCircuitBreakerOpen(error)
+      }
+      
+      // Notify error boundary if available
+      if (window.ErrorBoundary) {
+        const errorBoundary = new window.ErrorBoundary({ componentName: 'ConnectionManager' })
+        errorBoundary.handleError(error, {
+          circuitBreakerFailures: this.circuitBreaker.failures,
+          context: 'circuit_breaker'
+        })
+      }
+    }
+  }
+
+  /**
+   * Handle graceful degradation
+   */
+  async handleGracefulDegradation(message, options) {
+    this.log('info', `Graceful degradation for message type: ${message.type}`)
+    
+    // Queue message for later retry
+    if (!options.skipQueue) {
+      return this.queueMessage(message, { ...options, priority: 'low' })
+    }
+    
+    // Return mock response for non-critical operations
+    switch (message.type) {
+      case 'BEHAVIORAL_EVENT':
+      case 'ANALYTICS_UPDATE':
+        return { success: true, queued: true }
+      
+      case 'HEALTH_CHECK':
+        return { success: false, circuitBreakerOpen: true }
+      
+      default:
+        throw new Error('Circuit breaker open - no fallback available')
+    }
+  }
+
+  /**
+   * Enhanced health check with metrics
+   */
+  async performEnhancedHealthCheck() {
+    const startTime = performance.now()
+    this.healthMetrics.totalHealthChecks++
+    
+    try {
+      // Validate context first
+      await this.validateContext()
+      
+      if (!this.contextValid) {
+        throw new Error('Context invalid')
+      }
+      
+      // Test connection with timeout
+      const response = await this.sendMessage({
+        type: 'HEALTH_CHECK',
+        timestamp: Date.now(),
+        metrics: this.getHealthMetrics()
+      }, { skipQueue: true, timeout: 3000 })
+      
+      if (!response || !response.success) {
+        throw new Error('Invalid health check response')
+      }
+      
+      // Success
+      const responseTime = performance.now() - startTime
+      this.updateHealthMetrics(responseTime, true)
+      this.healthMetrics.successfulHealthChecks++
+      this.healthMetrics.consecutiveFailures = 0
+      
+      this.log('debug', 'Health check successful', { responseTime })
+      return true
+      
+    } catch (error) {
+      const responseTime = performance.now() - startTime
+      this.updateHealthMetrics(responseTime, false)
+      this.healthMetrics.consecutiveFailures++
+      
+      this.log('warn', 'Health check failed', { 
+        error: error.message, 
+        consecutiveFailures: this.healthMetrics.consecutiveFailures 
+      })
+      
+      if (this.onHealthCheckFail) {
+        this.onHealthCheckFail(error, this.healthMetrics.consecutiveFailures)
+      }
+      
+      // Handle critical health failures
+      if (this.healthMetrics.consecutiveFailures >= 3) {
+        await this.handleCriticalHealthFailure(error)
+      }
+      
+      return false
+    }
+  }
+
+  /**
+   * Handle critical health failure
+   */
+  async handleCriticalHealthFailure(error) {
+    this.log('error', 'Critical health failure detected', {
+      consecutiveFailures: this.healthMetrics.consecutiveFailures,
+      error: error.message
+    })
+    
+    if (this.isContextError(error)) {
+      await this.handleContextInvalidation()
+    } else {
+      // Force reconnection
+      this.isConnected = false
+      this.scheduleReconnection()
+    }
+  }
+
+  /**
+   * Update performance metrics
+   */
+  updatePerformanceMetrics(startTime, success) {
+    const duration = performance.now() - startTime
+    
+    this.performanceMetrics.totalMessages++
+    this.performanceMetrics.totalResponseTime += duration
+    this.performanceMetrics.averageResponseTime = 
+      this.performanceMetrics.totalResponseTime / this.performanceMetrics.totalMessages
+    
+    if (success) {
+      this.performanceMetrics.successfulMessages++
+    } else {
+      this.performanceMetrics.failedMessages++
+    }
+  }
+
+  /**
+   * Update health metrics
+   */
+  updateHealthMetrics(responseTime, success) {
+    this.healthMetrics.lastHealthCheck = Date.now()
+    
+    // Update average response time
+    const totalChecks = this.healthMetrics.totalHealthChecks
+    this.healthMetrics.averageResponseTime = 
+      ((this.healthMetrics.averageResponseTime * (totalChecks - 1)) + responseTime) / totalChecks
+  }
+
+  /**
+   * Get health metrics
+   */
+  getHealthMetrics() {
+    return {
+      ...this.healthMetrics,
+      healthRatio: this.healthMetrics.totalHealthChecks > 0 
+        ? (this.healthMetrics.successfulHealthChecks / this.healthMetrics.totalHealthChecks * 100).toFixed(1) + '%'
+        : 'N/A'
+    }
+  }
+
+  /**
+   * Get performance metrics
+   */
+  getPerformanceMetrics() {
+    return {
+      ...this.performanceMetrics,
+      successRate: this.performanceMetrics.totalMessages > 0
+        ? (this.performanceMetrics.successfulMessages / this.performanceMetrics.totalMessages * 100).toFixed(1) + '%'
+        : 'N/A'
+    }
+  }
+
+  /**
+   * Report performance metrics
+   */
+  reportPerformanceMetrics() {
+    const metrics = {
+      performance: this.getPerformanceMetrics(),
+      health: this.getHealthMetrics(),
+      circuitBreaker: {
+        isOpen: this.circuitBreaker.isOpen,
+        failures: this.circuitBreaker.failures,
+        lastFailure: this.circuitBreaker.lastFailure
+      },
+      connection: {
+        connected: this.isConnected,
+        contextValid: this.contextValid,
+        queueSize: this.messageQueue.length,
+        attempts: this.connectionAttempts
+      }
+    }
+    
+    this.log('info', 'Performance metrics report', metrics)
+    
+    // Send metrics to background for analytics if connected
+    if (this.isConnected && !this.circuitBreaker.isOpen) {
+      this.sendMessage({
+        type: 'CONNECTION_METRICS',
+        data: metrics,
+        timestamp: Date.now()
+      }, { skipQueue: true }).catch(error => {
+        this.log('debug', 'Failed to send metrics to background', { error: error.message })
+      })
+    }
+  }
+
+  /**
+   * Enhanced status with full metrics
+   */
+  getEnhancedStatus() {
+    return {
+      connection: {
+        connected: this.isConnected,
+        contextValid: this.contextValid,
+        queuedMessages: this.messageQueue.length,
+        connectionAttempts: this.connectionAttempts
+      },
+      circuitBreaker: {
+        isOpen: this.circuitBreaker.isOpen,
+        failures: this.circuitBreaker.failures,
+        lastFailure: this.circuitBreaker.lastFailure,
+        halfOpenAttempts: this.circuitBreaker.halfOpenAttempts
+      },
+      health: this.getHealthMetrics(),
+      performance: this.getPerformanceMetrics(),
+      options: this.options
+    }
+  }
+
+  /**
+   * Log helper method
+   */
+  log(level, message, data = null) {
+    if (this.logger) {
+      this.logger[level](message, data)
+    } else {
+      console[level === 'debug' ? 'debug' : level === 'info' ? 'info' : level === 'warn' ? 'warn' : 'error'](
+        `[ConnectionManager] ${message}`,
+        data || ''
+      )
+    }
+  }
+
+  /**
+   * Get current connection status (legacy method)
    */
   getStatus () {
     return {

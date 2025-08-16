@@ -47,28 +47,27 @@
 
 ### **Step 4: Website-Specific Testing**
 
-Test on these major platforms:
+Test on these major platforms and validate the time-based intervention behavior:
 
-#### **YouTube.com**
-- [ ] Navigate to YouTube
-- [ ] Scroll down several times
-- [ ] Check if intervention triggers after sustained scrolling
-- [ ] Verify popup shows YouTube-specific analytics
+#### **YouTube.com (video without scrolling)**
+- [ ] Open a video and do not scroll
+- [ ] After ~2–3 minutes: brightness should dim toward ~80%
+- [ ] After ~10 minutes of continuous playback: brightness ~50%, light blur appears (~0.75px), gentle shake briefly
+- [ ] After ~12 minutes: Stage 3 nudge overlay appears; verify buttons work
+- [ ] After ~15 minutes: final warning or breathing reminder (based on focus mode)
 
-#### **Instagram.com** (if accessible)
-- [ ] Navigate to Instagram
-- [ ] Scroll through feed
-- [ ] Test intervention system
+#### **Twitter/X.com (active scrolling)**
+- [ ] Scroll intermittently; ensure brightness progression only advances when actively scrolling
+- [ ] Pause scrolling for >2s; ensure timer doesn’t progress further
+- [ ] Resume scrolling; brightness continues from where it left off
 
-#### **Twitter/X.com**
-- [ ] Navigate to Twitter/X
-- [ ] Scroll through timeline
-- [ ] Test scroll detection
+#### **Instagram/TikTok (short-form)**
+- [ ] Scroll/swipe feed continuously; confirm brightness dimming curve and stage transitions follow time
+- [ ] Verify blur is subtle and does not ruin readability
 
-#### **News Website** (e.g., BBC.com, CNN.com)
-- [ ] Navigate to news site
-- [ ] Scroll through articles
-- [ ] Test general pattern detection
+#### **News Website** (long reading)
+- [ ] Slow scroll reading; confirm brightness still progresses (active scrolling)
+- [ ] If you stop to read (no scroll >2s), brightness progression pauses
 
 ### **Step 5: Settings Persistence Testing**
 

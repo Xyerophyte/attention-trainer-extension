@@ -198,4 +198,5 @@ class AttentionTrainerPopup {
 }
 
 // Initialize popup
-new AttentionTrainerPopup()
+const popupInstance = new AttentionTrainerPopup()
+window.attentionTrainerPopup = popupInstance

@@ -25,7 +25,9 @@ class AttentionTrainerContent {
       focusMode: false,
       snoozeUntil: null,
       flags: {},
-      contentPieces: 0
+      contentPieces: 0,
+      scrollingStarted: false,
+      actualScrollStartTime: null
     }
 
     // Legacy scroll tracking compatibility (for backward compatibility)
@@ -47,7 +49,600 @@ class AttentionTrainerContent {
     this.settings = {}
     this.observers = []
 
+    // Time-based distraction tracking state
+    this.distractionState = {
+      activeMs: 0,
+      lastActiveTs: 0,
+      lastScrollTs: 0,
+      mediaPlaying: false,
+      stage: 0,
+      lastStageChangeTs: 0,
+      persistenceKey: null
+    }
+
+    // Brightness controller state
+    this.brightnessState = {
+      currentPercent: 100
+    }
+
+    // Performance optimization - batched updates
+    this.scoreUpdateScheduled = false
+    this.analyticsQueue = []
+    this.lastAnalyticsFlush = Date.now()
+    const ANALYTICS_FLUSH_INTERVAL = 30000; // Flush analytics every 30 seconds
+
+    // IntersectionObserver pool for better performance
+    this.observerPool = {
+      contentViewing: null,
+      observers: new Map(), // Track elements and their observers
+      pendingElements: new Set() // Elements waiting to be observed
+    }
+    this.observerCleanupInterval = null
+
+    // Memory leak prevention - track resources for cleanup
+    this.activeTimers = new Set()
+    this.eventListeners = new Map() // Track event listeners for cleanup
+    this.isDestroyed = false
+    
+    // Unified timer manager for consolidated operations
+    this.timerManager = {
+      mainTimer: null,
+      taskQueue: new Map(), // Tasks to run with their intervals
+      lastRun: new Map(),   // Track when tasks last ran
+      isRunning: false
+    }
+    
+    // Lazy loading state management
+    this.lazyLoadingState = {
+      behavioralAnalysisSetup: false,
+      scrollAnalysisSetup: false,
+      interactionTrackingSetup: false,
+      contentTrackingSetup: false,
+      siteSpecificTrackingSetup: false,
+      firstInteractionDetected: false,
+      setupTimeout: null,
+      scrollTrackingStarted: false
+    }
+    
+    // Bind methods to preserve context
+    this.destroy = this.destroy.bind(this)
+    this.handlePageUnload = this.handlePageUnload.bind(this)
+    
+    // Set up automatic cleanup on page unload
+    this.setupCleanupHandlers()
+
     this.init()
+  }
+
+  // ---------------- Brightness Controller ----------------
+  initBrightnessController() {
+    try {
+      document.documentElement.classList.add('attention-trainer-brightness-transition')
+      // Initialize at 100%
+      this.setBrightness(100)
+    } catch (e) {
+      console.warn('Brightness controller init failed:', e)
+    }
+  }
+
+  setBrightness(percent) {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)))
+    this.brightnessState.currentPercent = clamped
+    document.documentElement.style.filter = `brightness(${clamped}%)`
+  }
+
+  updateBrightnessForTime(ms) {
+    // Default curve: 0-3 min: 100 -> 80, 3-10 min: 80 -> 50, 10+ min: 50
+    const mins = ms / 60000
+    let target = 100
+    if (mins <= 3) {
+      // linear from 100 to 80
+      target = 100 - (20 * (mins / 3))
+    } else if (mins <= 10) {
+      const t = (mins - 3) / 7
+      target = 80 - (30 * t) // 80 -> 50
+    } else {
+      target = 50
+    }
+    this.setBrightness(target)
+  }
+
+  // ---------------- Distraction Time Tracking ----------------
+  setupDistractionTracking() {
+    // Build persistence key
+    const domain = window.location.hostname
+    const date = new Date().toISOString().split('T')[0]
+    this.distractionState.persistenceKey = `distractionState_${domain}_${date}`
+
+    // Restore prior state if exists
+    this.restoreDistractionTime()
+
+    // Scroll activity marker (passive)
+    const onScroll = () => {
+      this.distractionState.lastScrollTs = Date.now()
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+
+    // Media tracking
+    this.trackMediaActivity()
+
+    // Visibility handling - pause when hidden
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        this.distractionState.lastActiveTs = Date.now() // mark now to avoid jumps
+      }
+    })
+
+    // Main 1s tick to accumulate active time, drive brightness and stage
+    this.addTimerTask('distraction_tick', () => {
+      try {
+        const now = Date.now()
+        const active = this.isDistractionActive(now)
+        if (active) {
+          this.distractionState.activeMs += 1000
+          // Update brightness smoothly
+          this.updateBrightnessForTime(this.distractionState.activeMs)
+          // Stage computation and transitions
+          this.evaluateTimeBasedStages(now)
+        }
+      } catch (e) {
+        console.warn('Distraction tick error:', e)
+      }
+    }, 1000)
+
+    // Persist every 10s
+    this.addTimerTask('distraction_persist', () => {
+      this.persistDistractionTime()
+    }, 10000)
+  }
+
+  isDistractionActive(nowTs = Date.now()) {
+    // Active if: recent scroll (within idle window) OR any media playing, and tab visible
+    const cfg = this.getInterventionConfig()
+    const scrollIdleMs = cfg?.idleDetection?.scrollIdleMs ?? 2000
+    const visible = document.visibilityState === 'visible'
+    const recentScroll = nowTs - (this.distractionState.lastScrollTs || 0) <= scrollIdleMs
+    const media = !!this.distractionState.mediaPlaying
+    return visible && (recentScroll || media)
+  }
+
+  trackMediaActivity() {
+    const attach = (el) => {
+      if (!el || el.__attentionTrainerBound) return
+      el.__attentionTrainerBound = true
+      const onPlay = () => { this.distractionState.mediaPlaying = true }
+      const onPauseEnd = () => {
+        // If no other media is playing, mark false
+        this.distractionState.mediaPlaying = this.anyMediaPlaying()
+      }
+      el.addEventListener('play', onPlay)
+      el.addEventListener('pause', onPauseEnd)
+      el.addEventListener('ended', onPauseEnd)
+    }
+
+    // Existing media
+    document.querySelectorAll('video, audio').forEach(attach)
+
+    // Watch for dynamically added media
+    const mo = new MutationObserver(muts => {
+      for (const m of muts) {
+        m.addedNodes && m.addedNodes.forEach(n => {
+          if (n && n.nodeType === 1) {
+            if (n.matches && (n.matches('video') || n.matches('audio'))) attach(n)
+            n.querySelectorAll && n.querySelectorAll('video, audio').forEach(attach)
+          }
+        })
+      }
+    })
+    mo.observe(document.documentElement || document.body, { childList: true, subtree: true })
+    this.observers.push(mo)
+  }
+
+  anyMediaPlaying() {
+    const els = document.querySelectorAll('video, audio')
+    for (const el of els) { if (!el.paused && !el.ended) return true }
+    return false
+  }
+
+  getInterventionConfig() {
+    // Settings may include interventionConfig injected by background
+    return this.settings?.interventionConfig || null
+  }
+
+  async persistDistractionTime() {
+    try {
+      const key = this.distractionState.persistenceKey
+      if (!key || !chrome?.storage?.local) return
+      await chrome.storage.local.set({ [key]: { activeMs: this.distractionState.activeMs, ts: Date.now() } })
+    } catch (e) {
+      console.warn('Persist distraction time failed:', e?.message || e)
+    }
+  }
+
+  async restoreDistractionTime() {
+    try {
+      const key = this.distractionState.persistenceKey
+      if (!key || !chrome?.storage?.local) return
+      const data = await chrome.storage.local.get([key])
+      const state = data?.[key]
+      if (state && typeof state.activeMs === 'number') {
+        this.distractionState.activeMs = state.activeMs
+        // Apply brightness immediately to match restored time
+        this.initBrightnessController()
+        this.updateBrightnessForTime(this.distractionState.activeMs)
+        // Also evaluate stage right away
+        this.evaluateTimeBasedStages(Date.now(), true)
+        
+        console.log(`🔄 Restored distraction state: ${Math.round(state.activeMs / 60000)} minutes, brightness: ${this.brightnessState.currentPercent}%`)
+      }
+    } catch (e) {
+      console.warn('Restore distraction time failed:', e?.message || e)
+    }
+  }
+
+  evaluateTimeBasedStages(nowTs = Date.now(), force = false) {
+    // Check if focus mode or snooze is active - exit early if so
+    if (this.behaviorData.focusMode || 
+        (this.behaviorData.snoozeUntil && nowTs < this.behaviorData.snoozeUntil)) {
+      console.log('⏸️ Interventions blocked - focus mode or snooze active')
+      return
+    }
+
+    const cfg = this.getInterventionConfig()
+    const minutesCfg = cfg?.thresholdsMinutes || {
+      stage1Start: 0,
+      stage1To80End: 3,
+      stage1To50End: 10,
+      stage2Start: 10,
+      stage3Start: 12,
+      stage4Start: 15
+    }
+    const debounceMs = cfg?.debounceMs ?? 20000
+
+    const ms = this.distractionState.activeMs
+    let nextStage = 0
+    if (ms >= minutesCfg.stage4Start * 60000) nextStage = 4
+    else if (ms >= minutesCfg.stage3Start * 60000) nextStage = 3
+    else if (ms >= minutesCfg.stage2Start * 60000) nextStage = 2
+    else if (ms >= minutesCfg.stage1Start * 60000) nextStage = 1
+
+    if (nextStage !== this.distractionState.stage) {
+      const sinceLast = nowTs - (this.distractionState.lastStageChangeTs || 0)
+      if (force || sinceLast >= debounceMs) {
+        this.distractionState.stage = nextStage
+        this.distractionState.lastStageChangeTs = nowTs
+        if (nextStage > 0) {
+          this.triggerIntervention(nextStage, this.settings.focusMode || 'gentle')
+        }
+      }
+    }
+  }
+
+  /**
+   * Set up automatic cleanup on page unload and extension context invalidation
+   */
+  setupCleanupHandlers() {
+    // Handle page unload - clean up resources
+    window.addEventListener('beforeunload', this.handlePageUnload)
+    window.addEventListener('pagehide', this.handlePageUnload)
+    
+    // Handle visibility changes (tab switching, etc.)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        this.pauseTimers()
+      } else if (document.visibilityState === 'visible' && !this.isDestroyed) {
+        this.resumeTimers()
+      }
+    })
+    
+    // Set up periodic resource cleanup using unified timer
+    this.addTimerTask('periodic_cleanup', () => {
+      this.performPeriodicCleanup()
+    }, 300000) // Clean up every 5 minutes
+  }
+
+  /**
+   * Handle page unload event
+   */
+  handlePageUnload() {
+    this.destroy()
+  }
+
+  /**
+   * Add timer to tracking set for cleanup
+   */
+  addTimer(timerId) {
+    if (!this.isDestroyed) {
+      this.activeTimers.add(timerId)
+    }
+    return timerId
+  }
+
+  /**
+   * Remove and clear a specific timer
+   */
+  removeTimer(timerId) {
+    if (this.activeTimers.has(timerId)) {
+      clearTimeout(timerId)
+      clearInterval(timerId)
+      this.activeTimers.delete(timerId)
+    }
+  }
+
+  /**
+   * Add event listener with automatic cleanup tracking
+   */
+  addEventListenerWithCleanup(element, event, handler, options = {}) {
+    if (this.isDestroyed) {
+      return
+    }
+    
+    const boundHandler = handler.bind(this)
+    element.addEventListener(event, boundHandler, options)
+    
+    // Track for cleanup
+    if (!this.eventListeners.has(element)) {
+      this.eventListeners.set(element, [])
+    }
+    this.eventListeners.get(element).push({
+      event,
+      handler: boundHandler,
+      options
+    })
+  }
+
+  /**
+   * Pause all active timers (for tab visibility changes)
+   */
+  pauseTimers() {
+    // Store timer states but don't clear them - they'll resume automatically
+    this.timersPaused = true
+  }
+
+  /**
+   * Resume timers after pause
+   */
+  resumeTimers() {
+    this.timersPaused = false
+    // Timers will automatically resume since they weren't cleared
+  }
+
+  /**
+   * Perform periodic cleanup of resources
+   */
+  performPeriodicCleanup() {
+    if (this.isDestroyed) {
+      return
+    }
+    
+    try {
+      // Clean up old observed elements
+      this.cleanupOldObservedElements()
+      
+      // Clean up stale event listeners for removed DOM elements
+      for (const [element, listeners] of this.eventListeners.entries()) {
+        if (!document.contains(element)) {
+          this.cleanupElementListeners(element)
+        }
+      }
+      
+      console.log('🧹 Periodic cleanup completed')
+    } catch (error) {
+      console.warn('Error during periodic cleanup:', error)
+    }
+  }
+
+  /**
+   * Clean up event listeners for a specific element
+   */
+  cleanupElementListeners(element) {
+    const listeners = this.eventListeners.get(element)
+    if (listeners) {
+      listeners.forEach(({ event, handler, options }) => {
+        try {
+          element.removeEventListener(event, handler, options)
+        } catch (error) {
+          // Ignore errors for already removed listeners
+        }
+      })
+      this.eventListeners.delete(element)
+    }
+  }
+
+  /**
+   * Add a task to the unified timer manager
+   */
+  addTimerTask(taskName, taskFunction, intervalMs) {
+    if (this.isDestroyed) {
+      return
+    }
+    
+    this.timerManager.taskQueue.set(taskName, {
+      func: taskFunction,
+      interval: intervalMs,
+      enabled: true
+    })
+    
+    this.timerManager.lastRun.set(taskName, 0) // Initialize last run time
+    
+    // Start the main timer if not already running
+    this.startUnifiedTimer()
+    
+    console.log(`⏲️ Added timer task: ${taskName} (${intervalMs}ms)`)
+  }
+  
+  /**
+   * Remove a task from the unified timer manager
+   */
+  removeTimerTask(taskName) {
+    this.timerManager.taskQueue.delete(taskName)
+    this.timerManager.lastRun.delete(taskName)
+    
+    console.log(`🗑️ Removed timer task: ${taskName}`)
+    
+    // Stop main timer if no tasks remain
+    if (this.timerManager.taskQueue.size === 0) {
+      this.stopUnifiedTimer()
+    }
+  }
+  
+  /**
+   * Start the unified timer that manages all periodic tasks
+   */
+  startUnifiedTimer() {
+    if (this.timerManager.isRunning || this.isDestroyed) {
+      return
+    }
+    
+    this.timerManager.isRunning = true
+    
+    // Use a single timer that checks all tasks
+    this.timerManager.mainTimer = this.addTimer(setInterval(() => {
+      this.runScheduledTasks()
+    }, 1000)) // Check every second for task scheduling
+    
+    console.log('🚀 Unified timer manager started')
+  }
+  
+  /**
+   * Stop the unified timer
+   */
+  stopUnifiedTimer() {
+    if (this.timerManager.mainTimer) {
+      this.removeTimer(this.timerManager.mainTimer)
+      this.timerManager.mainTimer = null
+    }
+    
+    this.timerManager.isRunning = false
+    console.log('⏹️ Unified timer manager stopped')
+  }
+  
+  /**
+   * Run scheduled tasks based on their intervals
+   */
+  runScheduledTasks() {
+    if (this.isDestroyed || this.timersPaused) {
+      return
+    }
+    
+    const now = Date.now()
+    
+    for (const [taskName, task] of this.timerManager.taskQueue.entries()) {
+      if (!task.enabled) {
+        continue
+      }
+      
+      const lastRun = this.timerManager.lastRun.get(taskName) || 0
+      const timeSinceLastRun = now - lastRun
+      
+      if (timeSinceLastRun >= task.interval) {
+        try {
+          // Use requestIdleCallback for non-critical tasks
+          if (this.isNonCriticalTask(taskName) && window.requestIdleCallback) {
+            window.requestIdleCallback(() => {
+              if (!this.isDestroyed) {
+                task.func()
+              }
+            }, { timeout: 2000 })
+          } else {
+            task.func()
+          }
+          
+          this.timerManager.lastRun.set(taskName, now)
+        } catch (error) {
+          console.error(`Error running timer task ${taskName}:`, error)
+          // Disable failed task to prevent repeated errors
+          task.enabled = false
+        }
+      }
+    }
+  }
+  
+  /**
+   * Determine if a task is non-critical and can be deferred
+   */
+  isNonCriticalTask(taskName) {
+    const nonCriticalTasks = [
+      'analytics_flush',
+      'observer_cleanup',
+      'periodic_cleanup'
+    ]
+    
+    return nonCriticalTasks.some(pattern => taskName.includes(pattern))
+  }
+
+  /**
+   * Comprehensive cleanup and resource disposal
+   */
+  destroy() {
+    if (this.isDestroyed) {
+      return
+    }
+    
+    console.log('🧹 Destroying AttentionTrainerContent - cleaning up resources')
+    this.isDestroyed = true
+    
+    // Clear all active timers
+    for (const timerId of this.activeTimers) {
+      try {
+        clearTimeout(timerId)
+        clearInterval(timerId)
+      } catch (error) {
+        // Ignore errors for already cleared timers
+      }
+    }
+    this.activeTimers.clear()
+    
+    // Clean up all event listeners
+    for (const [element, listeners] of this.eventListeners.entries()) {
+      listeners.forEach(({ event, handler, options }) => {
+        try {
+          element.removeEventListener(event, handler, options)
+        } catch (error) {
+          // Ignore errors for already removed listeners
+        }
+      })
+    }
+    this.eventListeners.clear()
+    
+    // Clean up page-level event listeners
+    try {
+      window.removeEventListener('beforeunload', this.handlePageUnload)
+      window.removeEventListener('pagehide', this.handlePageUnload)
+    } catch (error) {
+      // Ignore errors
+    }
+    
+    // Clean up observers
+    this.cleanupObservers()
+    
+    // Clear intervention overlay
+    if (this.interventionOverlay && this.interventionOverlay.parentElement) {
+      this.interventionOverlay.remove()
+    }
+    
+    // Clear analytics queue
+    this.analyticsQueue = []
+    
+    // Save final state to fallback storage if available
+    try {
+      this.saveBehaviorDataToFallback()
+    } catch (error) {
+      console.warn('Failed to save final state to fallback storage:', error)
+    }
+    
+    // Clear references to help with garbage collection
+    this.connectionManager = null
+    this.errorHandler = null
+    this.fallbackStorage = null
+    this.observers = []
+    this.observerPool = {
+      contentViewing: null,
+      observers: new Map(),
+      pendingElements: new Set()
+    }
+    
+    console.log('✅ AttentionTrainerContent cleanup completed')
   }
 
   async init () {
@@ -59,6 +654,8 @@ class AttentionTrainerContent {
       this.setupBehavioralAnalysis()
       this.setupMessageListener()
       this.createInterventionElements()
+      this.initBrightnessController()
+      this.setupDistractionTracking()
       this.startBehaviorTracking()
 
       console.log(`🎯 Attention Trainer initialized for ${this.sitePatterns.type} site`)
@@ -89,7 +686,7 @@ class AttentionTrainerContent {
 
         // Get modules with timeout
         const modulePromise = window.SharedModules.getModules()
-        const timeoutPromise = new Promise((_, reject) =>
+        const timeoutPromise = new Promise((_resolve, reject) =>
           setTimeout(() => reject(new Error('Module initialization timeout')), 3000)
         )
 
@@ -221,6 +818,31 @@ class AttentionTrainerContent {
       }
     })
     this.observers = []
+    
+    // Clean up observer pool
+    this.cleanupObserverPool()
+  }
+
+  /**
+   * Clean up observer pool completely
+   */
+  cleanupObserverPool() {
+    if (this.observerPool.contentViewing) {
+      try {
+        this.observerPool.contentViewing.disconnect()
+      } catch (error) {
+        console.warn('Error disconnecting pooled observer:', error)
+      }
+      this.observerPool.contentViewing = null
+    }
+    
+    this.observerPool.observers.clear()
+    this.observerPool.pendingElements.clear()
+    
+    if (this.observerCleanupInterval) {
+      clearTimeout(this.observerCleanupInterval)
+      this.observerCleanupInterval = null
+    }
   }
 
   /**
@@ -480,9 +1102,11 @@ class AttentionTrainerContent {
 
   // Enhanced Stage 1: Progressive dimming with pulse
   applyEnhancedDimming () {
-    document.body.classList.add('attention-trainer-dim', 'attention-trainer-pulse')
-    document.body.style.opacity = '0.75'
-    console.log('📉 Applied enhanced dimming')
+    // Use brightness-based dimming instead of opacity pulse
+    document.body.classList.add('attention-trainer-dim')
+    // Brightness will be controlled globally; keep a subtle pulse if desired
+    // document.body.classList.add('attention-trainer-pulse')
+    console.log('📉 Applied enhanced dimming (brightness-based)')
   }
 
   // Show scroll progress indicator
@@ -495,9 +1119,9 @@ class AttentionTrainerContent {
       document.body.appendChild(progressBar)
     }
 
-    const scrollTime = this.getScrollTime()
+    const activeScrollTime = this.distractionState.activeMs / 1000 // Convert to seconds
     const maxTime = 15 // 15 seconds for full progress
-    const progress = Math.min((scrollTime / maxTime) * 100, 100)
+    const progress = Math.min((activeScrollTime / maxTime) * 100, 100)
     progressBar.style.width = `${progress}%`
   }
 
@@ -506,9 +1130,12 @@ class AttentionTrainerContent {
     const elements = document.querySelectorAll('p, span, div:not([class*="attention-trainer"]), img, video, article, section')
     elements.forEach(el => {
       el.classList.add('attention-trainer-blur')
-      el.style.filter = 'blur(2px) brightness(0.8)'
+      // Use class-based blur only; do not set brightness here to avoid stacking
+      el.style.filter = ''
+      // Allow tuning via CSS variable
+      el.style.setProperty('--stage2-blur', `${this.getInterventionConfig()?.blur?.stage2Px ?? 0.75}px`)
     })
-    console.log('😵‍💫 Applied progressive blur')
+    console.log('😵‍💫 Applied progressive blur (reduced intensity)')
   }
 
   addGentleShake () {
@@ -529,7 +1156,7 @@ class AttentionTrainerContent {
     ]
 
     const selectedMessage = messages[Math.floor(Math.random() * messages.length)]
-    const scrollTime = this.getScrollTime()
+    const activeScrollTime = Math.round(this.distractionState.activeMs / 1000) // Convert to seconds
     const scrollDistance = Math.round(this.scrollData.scrollDistance / 100) // Convert to rough screen heights
 
     this.interventionOverlay.innerHTML = `
@@ -541,8 +1168,8 @@ class AttentionTrainerContent {
           
           <div class="nudge-stats">
             <div class="stat-item">
-              <div class="stat-value">${Math.round(scrollTime)}s</div>
-              <div class="stat-label">Scrolling</div>
+              <div class="stat-value">${activeScrollTime}s</div>
+              <div class="stat-label">Active Time</div>
             </div>
             <div class="stat-item">
               <div class="stat-value">${scrollDistance}</div>
@@ -609,12 +1236,14 @@ class AttentionTrainerContent {
   }
 
   showFinalWarning () {
+    const activeScrollTime = Math.round(this.distractionState.activeMs / 1000) // Convert to seconds
+    
     this.interventionOverlay.innerHTML = `
       <div class="attention-trainer-nudge" style="border: 3px solid #ef4444;">
         <div class="nudge-content">
           <span class="nudge-icon">⚠️</span>
           <h3 style="color: #ef4444;">Attention overload detected</h3>
-          <p class="nudge-subtitle">You've been scrolling for ${Math.round(this.getScrollTime())} seconds straight</p>
+          <p class="nudge-subtitle">You've been actively scrolling for ${activeScrollTime} seconds straight</p>
           
           <div class="nudge-actions">
             <button class="continue-btn">Take a 5-min break</button>
@@ -701,6 +1330,8 @@ class AttentionTrainerContent {
     if (resetStage) {
       this.behaviorData.interventionStage = 0
       this.scrollData.interventionStage = 0 // Keep both in sync
+      // Reset time-based stage as well
+      this.distractionState.stage = 0
     }
 
     // Remove all intervention classes and effects
@@ -708,11 +1339,20 @@ class AttentionTrainerContent {
     document.body.style.opacity = ''
     document.body.style.overflow = ''
 
+    // Reset global brightness
+    try {
+      document.documentElement.style.filter = ''
+      document.documentElement.classList.remove('attention-trainer-brightness-transition')
+      // Reapply transition class after a tick for future use
+      setTimeout(() => document.documentElement.classList.add('attention-trainer-brightness-transition'), 0)
+    } catch {}
+
     // Remove blur effects
     const blurredElements = document.querySelectorAll('.attention-trainer-blur')
     blurredElements.forEach(el => {
       el.classList.remove('attention-trainer-blur')
       el.style.filter = ''
+      el.style.removeProperty('--stage2-blur')
     })
 
     // Remove progress bar
@@ -848,15 +1488,94 @@ class AttentionTrainerContent {
     }
   }
 
-  setupBehavioralAnalysis () {
-    // Multi-layered behavioral detection
-    this.setupScrollAnalysis() // Enhanced scroll analysis
-    this.setupTimeTracking()
-    this.setupInteractionTracking() // Tracks engagement
-    this.setupContentConsumptionTracking() // Monitors content velocity
-    this.setupSiteSpecificTracking() // Contextual profiles
-
-    console.log('🧠 Advanced behavioral analysis activated')
+  /**
+   * Setup behavioral analysis with lazy loading for better performance
+   */
+  setupBehavioralAnalysis() {
+    if (this.lazyLoadingState.behavioralAnalysisSetup) {
+      return // Already setup
+    }
+    
+    this.lazyLoadingState.behavioralAnalysisSetup = true
+    
+    // Setup critical components immediately
+    this.setupTimeTracking() // Time tracking is essential
+    
+    // Setup lightweight first-interaction detection
+    this.setupFirstInteractionDetection()
+    
+    // Schedule lazy initialization after a delay
+    this.lazyLoadingState.setupTimeout = this.addTimer(setTimeout(() => {
+      this.initializeRemainingAnalysis()
+    }, 2000)) // Wait 2 seconds before full setup
+    
+    console.log('🧠 Behavioral analysis initialized with lazy loading')
+  }
+  
+  /**
+   * Setup lightweight first-interaction detection
+   */
+  setupFirstInteractionDetection() {
+    const handleFirstInteraction = () => {
+      if (this.lazyLoadingState.firstInteractionDetected || this.isDestroyed) {
+        return
+      }
+      
+      this.lazyLoadingState.firstInteractionDetected = true
+      console.log('👆 First interaction detected, activating full analysis')
+      
+      // Immediately setup full analysis on first interaction
+      if (window.requestIdleCallback) {
+        window.requestIdleCallback(() => this.initializeRemainingAnalysis(), { timeout: 1000 })
+      } else {
+        setTimeout(() => this.initializeRemainingAnalysis(), 50)
+      }
+    }
+    
+    // Use passive listeners for better performance
+    const events = ['scroll', 'click', 'keydown', 'touchstart', 'mousemove']
+    events.forEach(event => {
+      document.addEventListener(event, handleFirstInteraction, { 
+        passive: true, 
+        once: true // Only fire once
+      })
+    })
+  }
+  
+  /**
+   * Initialize remaining analysis components lazily
+   */
+  initializeRemainingAnalysis() {
+    if (this.isDestroyed) {
+      return
+    }
+    
+    try {
+      // Setup remaining components
+      if (!this.lazyLoadingState.scrollAnalysisSetup) {
+        this.setupScrollAnalysisLazy()
+        this.lazyLoadingState.scrollAnalysisSetup = true
+      }
+      
+      if (!this.lazyLoadingState.interactionTrackingSetup) {
+        this.setupInteractionTrackingLazy()
+        this.lazyLoadingState.interactionTrackingSetup = true
+      }
+      
+      if (!this.lazyLoadingState.contentTrackingSetup) {
+        this.setupContentConsumptionTrackingLazy()
+        this.lazyLoadingState.contentTrackingSetup = true
+      }
+      
+      if (!this.lazyLoadingState.siteSpecificTrackingSetup) {
+        this.setupSiteSpecificTrackingLazy()
+        this.lazyLoadingState.siteSpecificTrackingSetup = true
+      }
+      
+      console.log('🚀 Full behavioral analysis activated')
+    } catch (error) {
+      console.error('Error initializing remaining analysis:', error)
+    }
   }
 
   setupScrollAnalysis () {
@@ -864,24 +1583,52 @@ class AttentionTrainerContent {
     const scrollVelocity = []
     const scrollDirection = []
     let _rapidScrollCount = 0
+    let scrollTicking = false
+    let pendingScrollData = null
+    let lastAnalysisTime = 0
+    const SCROLL_ANALYSIS_DEBOUNCE = 100; // Debounce time in ms
+    const SCROLL_ANALYSIS_THROTTLE = 250; // Min time between full analyses
 
-    const analyzeScroll = () => {
-      if (!this.settings.isEnabled || this.behaviorData.focusMode) {
-        return
-      }
-
+    // Lightweight scroll data collector - runs on every scroll event
+    const collectScrollData = () => {
       const currentY = window.scrollY
       const velocity = Math.abs(currentY - lastScrollY)
       const direction = currentY > lastScrollY ? 'down' : 'up'
-
-      // Scroll pause detection (indicative of reading)
-      if (velocity < 10) {
-        this.behaviorData.scrollPauseCount = (this.behaviorData.scrollPauseCount || 0) + 1
-      } else {
-        this.behaviorData.scrollPauseCount = 0 // Reset on movement
+      
+      // Mark scrolling as started on first actual scroll
+      if (!this.behaviorData.scrollingStarted && velocity > 5) {
+        this.behaviorData.scrollingStarted = true
+        this.behaviorData.actualScrollStartTime = Date.now()
+        console.log('🔄 Scrolling detected, starting behavioral analysis')
+      }
+      
+      pendingScrollData = {
+        velocity,
+        direction,
+        y: currentY,
+        timestamp: Date.now()
+      }
+      
+      // Only request animation frame if not already pending
+      if (!scrollTicking) {
+        scrollTicking = true
+        requestAnimationFrame(processScrollData)
       }
 
-      // Track scroll patterns
+      lastScrollY = currentY
+    }
+
+    // Process collected scroll data in animation frame - lightweight calculations only
+    const processScrollData = () => {
+      scrollTicking = false
+      
+      if (!pendingScrollData || !this.settings.isEnabled || this.behaviorData.focusMode) {
+        return
+      }
+      
+      const { velocity, direction, y, timestamp } = pendingScrollData
+      
+      // Maintain scroll history
       scrollVelocity.push(velocity)
       scrollDirection.push(direction)
 
@@ -892,51 +1639,88 @@ class AttentionTrainerContent {
       if (scrollDirection.length > 10) {
         scrollDirection.shift()
       }
-
-      // Detect rapid scrolling
-      const avgVelocity = scrollVelocity.reduce((a, b) => a + b, 0) / scrollVelocity.length
-      if (avgVelocity > 100) {
-        _rapidScrollCount++
-        this.behaviorData.rapidScrollCount++
+      
+      // Schedule detailed analysis if enough time has passed
+      const timeSinceLastAnalysis = timestamp - lastAnalysisTime
+      if (timeSinceLastAnalysis > SCROLL_ANALYSIS_THROTTLE) {
+        lastAnalysisTime = timestamp
+        // Use requestIdleCallback for non-critical analysis
+        if (window.requestIdleCallback) {
+          window.requestIdleCallback(() => analyzeScrollDetailed(), { timeout: 1000 })
+        } else {
+          setTimeout(() => analyzeScrollDetailed(), 10)
+        }
       }
-
-      // Detect back-and-forth behavior
-      const directionChanges = scrollDirection.reduce((count, dir, i) => {
-        return i > 0 && dir !== scrollDirection[i - 1] ? count + 1 : count
-      }, 0)
-
-      if (directionChanges > 6) {
-        this.behaviorData.backAndForthCount++
-        this.addBehaviorFlag('erratic_scrolling')
-      }
-
-      lastScrollY = currentY
-      this.updateBehaviorScore()
     }
 
-    let scrollTimeout
-    window.addEventListener('scroll', () => {
-      clearTimeout(scrollTimeout)
-      scrollTimeout = setTimeout(analyzeScroll, 50)
-    }, { passive: true })
-  }
-
-  setupTimeTracking () {
-    // Track time spent on page
-    setInterval(() => {
-      if (!this.settings.isEnabled) {
+    // Detailed scroll analysis - runs less frequently
+    const analyzeScrollDetailed = () => {
+      if (!this.settings.isEnabled || this.behaviorData.focusMode) {
         return
       }
 
-      this.behaviorData.totalTimeOnPage = Date.now() - this.behaviorData.sessionStart
+      // Scroll pause detection (indicative of reading)
+      const lastVelocity = scrollVelocity[scrollVelocity.length - 1] || 0
+      if (lastVelocity < 10) {
+        this.behaviorData.scrollPauseCount = (this.behaviorData.scrollPauseCount || 0) + 1
+      } else {
+        this.behaviorData.scrollPauseCount = 0 // Reset on movement
+      }
 
-      // Detect excessive time spent
+      // Detect rapid scrolling
+      if (scrollVelocity.length > 3) {
+        const avgVelocity = scrollVelocity.reduce((a, b) => a + b, 0) / scrollVelocity.length
+        if (avgVelocity > 100) {
+          _rapidScrollCount++
+          this.behaviorData.rapidScrollCount++
+        }
+
+        // Detect back-and-forth behavior
+        const directionChanges = scrollDirection.reduce((count, dir, i) => {
+          return i > 0 && dir !== scrollDirection[i - 1] ? count + 1 : count
+        }, 0)
+
+        if (directionChanges > 6) {
+          this.behaviorData.backAndForthCount++
+          this.addBehaviorFlag('erratic_scrolling')
+        }
+
+        // Schedule score update on next idle period
+        if (window.requestIdleCallback) {
+          window.requestIdleCallback(() => this.updateBehaviorScore(), { timeout: 2000 })
+        } else {
+          setTimeout(() => this.updateBehaviorScore(), 500)
+        }
+      }
+    }
+
+    // Use passive event listener for better scroll performance
+    window.addEventListener('scroll', collectScrollData, { passive: true })
+  }
+
+  setupTimeTracking () {
+    // Track time spent on page using unified timer system
+    this.addTimerTask('time_tracking', () => {
+      if (!this.settings.isEnabled || this.isDestroyed) {
+        return
+      }
+
+      // Only start tracking time after scrolling has started
+      if (!this.behaviorData.scrollingStarted) {
+        return // Don't track time or update scores until scrolling begins
+      }
+
+      // Calculate actual time spent since scrolling started
+      const actualStartTime = this.behaviorData.actualScrollStartTime || this.behaviorData.sessionStart
+      this.behaviorData.totalTimeOnPage = Date.now() - actualStartTime
+
+      // Only flag excessive time if user is actually scrolling
       const minutes = this.behaviorData.totalTimeOnPage / (1000 * 60)
       if (minutes > this.sitePatterns.thresholds.time / 60) {
         this.addBehaviorFlag('excessive_time')
       }
 
-      // Track passive consumption time
+      // Track passive consumption time only during active sessions
       if (!this.behaviorData.lastInteractionTime ||
           (Date.now() - this.behaviorData.lastInteractionTime) > 10000) { // 10s idle
         this.behaviorData.passiveConsumptionTime += 10
@@ -984,7 +1768,7 @@ class AttentionTrainerContent {
       // Update last interaction time for passive consumption tracking
       this.behaviorData.lastInteractionTime = now
       lastInteractionTime = now
-      this.updateBehaviorScore()
+      this.scheduleScoreUpdate()
     }
 
     document.addEventListener('click', (e) => trackInteraction('click', e), { passive: true })
@@ -1128,6 +1912,272 @@ class AttentionTrainerContent {
     })
   }
 
+  // Lazy loading versions of setup methods
+  
+  /**
+   * Lazy version of setupScrollAnalysis with passive event listeners
+   */
+  setupScrollAnalysisLazy() {
+    // Reuse the existing scroll analysis but ensure it's optimized
+    this.setupScrollAnalysis()
+  }
+  
+  /**
+   * Lazy version of setupInteractionTracking with passive event listeners
+   */
+  setupInteractionTrackingLazy() {
+    let clickCount = 0
+    let keyCount = 0
+    let lastInteractionTime = Date.now()
+
+    const trackInteraction = (type, event) => {
+      if (!this.settings.isEnabled || this.isDestroyed) {
+        return
+      }
+
+      const now = Date.now()
+      const timeSinceLastInteraction = now - lastInteractionTime
+
+      if (type === 'click') {
+        clickCount++
+      }
+      if (type === 'key') {
+        keyCount++
+      }
+
+      // Detect rapid interactions (possible mindless clicking)
+      if (timeSinceLastInteraction < 500) {
+        this.addBehaviorFlag('rapid_interaction')
+      }
+
+      // Differentiate between productive and unproductive interactions
+      if (event && event.target) {
+        const targetElement = event.target
+        if (targetElement.matches('a, button, input, textarea, [role="button"]')) {
+          this.addBehaviorFlag('productive_interaction')
+        } else {
+          this.addBehaviorFlag('passive_interaction')
+        }
+      }
+
+      // Update last interaction time for passive consumption tracking
+      this.behaviorData.lastInteractionTime = now
+      lastInteractionTime = now
+      this.scheduleScoreUpdate()
+    }
+
+    // Use passive event listeners and track with cleanup system
+    this.addEventListenerWithCleanup(document, 'click', (e) => trackInteraction('click', e), { passive: true })
+    this.addEventListenerWithCleanup(document, 'keydown', (e) => trackInteraction('key', e), { passive: true })
+  }
+  
+  /**
+   * Lazy version of setupContentConsumptionTracking
+   */
+  setupContentConsumptionTrackingLazy() {
+    const contentSelector = this.sitePatterns.selectors.content
+    const postSelector = this.sitePatterns.selectors.posts
+
+    if (!contentSelector || !postSelector) {
+      return
+    }
+
+    // Use requestIdleCallback to defer observer setup
+    const setupObserver = () => {
+      if (this.isDestroyed) {
+        return
+      }
+      
+      const observer = new MutationObserver((mutations) => {
+        // Batch process mutations using requestIdleCallback
+        if (window.requestIdleCallback) {
+          window.requestIdleCallback(() => {
+            if (this.isDestroyed) return
+            
+            mutations.forEach(mutation => {
+              mutation.addedNodes.forEach(node => {
+                if (node.nodeType === 1 && node.matches && node.matches(postSelector)) {
+                  this.trackContentConsumption(node)
+                }
+              })
+            })
+          }, { timeout: 1000 })
+        } else {
+          // Fallback for browsers without requestIdleCallback
+          setTimeout(() => {
+            if (this.isDestroyed) return
+            
+            mutations.forEach(mutation => {
+              mutation.addedNodes.forEach(node => {
+                if (node.nodeType === 1 && node.matches && node.matches(postSelector)) {
+                  this.trackContentConsumption(node)
+                }
+              })
+            })
+          }, 100)
+        }
+      })
+
+      const contentContainer = document.querySelector(contentSelector)
+      if (contentContainer) {
+        observer.observe(contentContainer, {
+          childList: true,
+          subtree: true
+        })
+        this.observers.push(observer)
+      }
+    }
+
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback(setupObserver, { timeout: 2000 })
+    } else {
+      setTimeout(setupObserver, 200)
+    }
+  }
+  
+  /**
+   * Lazy version of setupSiteSpecificTracking
+   */
+  setupSiteSpecificTrackingLazy() {
+    // Use requestIdleCallback to defer site-specific setup
+    const setupSiteSpecific = () => {
+      if (this.isDestroyed) {
+        return
+      }
+      
+      switch (this.sitePatterns.type) {
+        case 'video':
+          this.setupVideoTrackingLazy()
+          break
+        case 'social':
+        case 'microblog':
+          this.setupSocialTrackingLazy()
+          break
+        case 'shortform':
+          this.setupShortFormTrackingLazy()
+          break
+        case 'forum':
+          this.setupForumTrackingLazy()
+          break
+      }
+    }
+
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback(setupSiteSpecific, { timeout: 2000 })
+    } else {
+      setTimeout(setupSiteSpecific, 300)
+    }
+  }
+  
+  /**
+   * Lazy video tracking setup
+   */
+  setupVideoTrackingLazy() {
+    let videoStartTime = Date.now()
+    let videosWatched = 0
+    let skippedVideos = 0
+
+    const trackVideo = (e) => {
+      if (this.isDestroyed) return
+      
+      const target = e.target.closest('ytd-video-renderer, ytd-rich-item-renderer, a[href*="/watch"]')
+      if (target) {
+        videosWatched++
+        videoStartTime = Date.now()
+
+        // Check if this was a rapid skip
+        const timeOnLastVideo = Date.now() - videoStartTime
+        if (timeOnLastVideo < 10000) { // Less than 10 seconds
+          skippedVideos++
+          this.addBehaviorFlag('rapid_video_skip')
+        }
+
+        this.updateBehaviorScore()
+      }
+    }
+
+    this.addEventListenerWithCleanup(document, 'click', trackVideo, { passive: true })
+  }
+  
+  /**
+   * Lazy social tracking setup
+   */
+  setupSocialTrackingLazy() {
+    let postsViewed = 0
+    let likesGiven = 0
+
+    const trackSocial = (e) => {
+      if (this.isDestroyed) return
+      
+      if (e.target.matches('[data-testid*="like"], [aria-label*="Like"], .like-button')) {
+        likesGiven++
+        this.addBehaviorFlag('social_validation_seeking')
+      }
+
+      if (e.target.closest('article, [data-testid="tweet"]')) {
+        postsViewed++
+      }
+
+      this.updateBehaviorScore()
+    }
+
+    this.addEventListenerWithCleanup(document, 'click', trackSocial, { passive: true })
+  }
+  
+  /**
+   * Lazy short form tracking setup
+   */
+  setupShortFormTrackingLazy() {
+    let swipeCount = 0
+    let startY = 0
+
+    const handleTouchStart = (e) => {
+      if (this.isDestroyed) return
+      startY = e.touches[0].clientY
+    }
+
+    const handleTouchEnd = (e) => {
+      if (this.isDestroyed) return
+      
+      const endY = e.changedTouches[0].clientY
+      const swipeDistance = Math.abs(startY - endY)
+
+      if (swipeDistance > 100) {
+        swipeCount++
+        this.addBehaviorFlag('rapid_content_consumption')
+        this.updateBehaviorScore()
+      }
+    }
+
+    this.addEventListenerWithCleanup(document, 'touchstart', handleTouchStart, { passive: true })
+    this.addEventListenerWithCleanup(document, 'touchend', handleTouchEnd, { passive: true })
+  }
+  
+  /**
+   * Lazy forum tracking setup
+   */
+  setupForumTrackingLazy() {
+    let threadsVisited = 0
+    let depthLevel = 0
+
+    const trackForum = (e) => {
+      if (this.isDestroyed) return
+      
+      if (e.target.closest('a[href*="/comments/"], a[href*="/r/"]')) {
+        threadsVisited++
+        depthLevel++
+
+        if (depthLevel > 3) {
+          this.addBehaviorFlag('deep_thread_dive')
+        }
+
+        this.updateBehaviorScore()
+      }
+    }
+
+    this.addEventListenerWithCleanup(document, 'click', trackForum, { passive: true })
+  }
+
   trackContentConsumption (contentElement) {
     // Track how content is being consumed
     this.behaviorData.contentPieces = (this.behaviorData.contentPieces || 0) + 1
@@ -1158,22 +2208,274 @@ class AttentionTrainerContent {
     console.log(`🚩 Behavior flag: ${flag} (${this.behaviorData.flags[flag]})`)
   }
 
+  /**
+   * Optimized element engagement tracking using observer pool
+   */
   trackElementEngagement (element) {
-    const observer = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          this.addBehaviorFlag('content_viewed')
-        } else {
-          this.addBehaviorFlag('content_passed')
-        }
-      })
-    }, { threshold: 0.5 })
+    // Skip if element is already being observed
+    if (this.observerPool.observers.has(element)) {
+      return
+    }
 
-    observer.observe(element)
-    this.observers.push(observer)
+    // Use shared observer for better performance
+    if (!this.observerPool.contentViewing) {
+      this.observerPool.contentViewing = new IntersectionObserver((entries) => {
+        // Batch process entries for better performance
+        if (window.requestIdleCallback) {
+          window.requestIdleCallback(() => this.processIntersectionEntries(entries), { timeout: 1000 })
+        } else {
+          setTimeout(() => this.processIntersectionEntries(entries), 10)
+        }
+      }, { 
+        threshold: 0.5,
+        rootMargin: '50px' // Preload detection for better responsiveness
+      })
+      
+      this.observers.push(this.observerPool.contentViewing)
+    }
+
+    try {
+      this.observerPool.contentViewing.observe(element)
+      this.observerPool.observers.set(element, Date.now())
+      
+      // Schedule cleanup if we have too many observed elements
+      if (this.observerPool.observers.size > 50) {
+        this.scheduleObserverCleanup()
+      }
+    } catch (error) {
+      console.warn('Failed to observe element:', error)
+    }
   }
 
+  /**
+   * Process intersection observer entries with batching
+   */
+  processIntersectionEntries(entries) {
+    let viewedCount = 0
+    let passedCount = 0
+
+    entries.forEach(entry => {
+      const element = entry.target
+      
+      if (entry.isIntersecting) {
+        viewedCount++
+        // Remove from pending if it was there
+        this.observerPool.pendingElements.delete(element)
+      } else {
+        // Only count as "passed" if the element was previously viewed
+        if (this.observerPool.observers.has(element)) {
+          passedCount++
+        }
+      }
+    })
+
+    // Batch the flag updates to reduce function calls
+    if (viewedCount > 0) {
+      this.behaviorData.flags = this.behaviorData.flags || {}
+      this.behaviorData.flags.content_viewed = (this.behaviorData.flags.content_viewed || 0) + viewedCount
+    }
+    if (passedCount > 0) {
+      this.behaviorData.flags = this.behaviorData.flags || {}
+      this.behaviorData.flags.content_passed = (this.behaviorData.flags.content_passed || 0) + passedCount
+    }
+
+    // Only update score if there were significant changes
+    if (viewedCount > 0 || passedCount > 2) {
+      this.scheduleScoreUpdate()
+    }
+  }
+
+  /**
+   * Schedule cleanup of old observed elements
+   */
+  scheduleObserverCleanup() {
+    if (this.observerCleanupInterval) {
+      return // Already scheduled
+    }
+    
+    this.observerCleanupInterval = setTimeout(() => {
+      this.cleanupOldObservedElements()
+      this.observerCleanupInterval = null
+    }, 30000) // Cleanup every 30 seconds
+  }
+
+  /**
+   * Clean up old observed elements that are no longer in the DOM
+   */
+  cleanupOldObservedElements() {
+    if (!this.observerPool.contentViewing) {
+      return
+    }
+    
+    const now = Date.now()
+    const elementsToRemove = []
+    
+    // Find elements that are either not in DOM or very old
+    for (const [element, timestamp] of this.observerPool.observers.entries()) {
+      const age = now - timestamp
+      
+      // Remove if element is no longer in DOM or older than 5 minutes
+      if (!document.contains(element) || age > 300000) {
+        elementsToRemove.push(element)
+      }
+    }
+    
+    // Batch unobserve operations
+    elementsToRemove.forEach(element => {
+      try {
+        this.observerPool.contentViewing.unobserve(element)
+        this.observerPool.observers.delete(element)
+        this.observerPool.pendingElements.delete(element)
+      } catch (error) {
+        // Element might already be disconnected, ignore error
+      }
+    })
+    
+    if (elementsToRemove.length > 0) {
+      console.log(`🧹 Cleaned up ${elementsToRemove.length} old observed elements`)
+    }
+  }
+
+  /**
+   * Schedule a batched score update using requestIdleCallback for better performance
+   */
+  scheduleScoreUpdate() {
+    // Prevent multiple scheduled updates
+    if (this.scoreUpdateScheduled) {
+      return
+    }
+    
+    this.scoreUpdateScheduled = true
+    
+    // Use requestIdleCallback to defer score calculations during idle periods
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback((deadline) => {
+        // Only proceed if we have at least 5ms left or if timeout exceeded
+        if (deadline.timeRemaining() > 5 || deadline.didTimeout) {
+          this.performBatchedScoreUpdate()
+        } else {
+          // Reschedule if not enough time
+          this.scoreUpdateScheduled = false
+          setTimeout(() => this.scheduleScoreUpdate(), 100)
+        }
+      }, { timeout: 2000 })
+    } else {
+      // Fallback for browsers without requestIdleCallback
+      setTimeout(() => this.performBatchedScoreUpdate(), 100)
+    }
+  }
+
+  /**
+   * Perform the actual score update and analytics processing
+   */
+  performBatchedScoreUpdate() {
+    this.scoreUpdateScheduled = false
+    
+    try {
+      // Update behavior score
+      this.updateBehaviorScoreInternal()
+      
+      // Queue analytics data instead of sending immediately
+      this.queueAnalyticsData()
+      
+      // Check if we need to flush analytics queue
+      const now = Date.now()
+      if (now - this.lastAnalyticsFlush > 30000) { // 30 seconds
+        this.flushAnalyticsQueue()
+      }
+      
+      // Trigger interventions based on score (this should remain immediate)
+      this.checkInterventionTriggers()
+    } catch (error) {
+      console.error('Error in batched score update:', error)
+    }
+  }
+
+  /**
+   * Queue analytics data for batched sending
+   */
+  queueAnalyticsData() {
+    const timeMinutes = this.behaviorData.totalTimeOnPage / (1000 * 60)
+    const timeSeconds = this.behaviorData.totalTimeOnPage / 1000
+
+    // Calculate intervention count for this session
+    const interventionCount = Object.keys(this.behaviorData.flags || {}).reduce((count, flag) => {
+      if (flag.includes('intervention') || this.behaviorData.interventionStage > 0) {
+        return count + 1
+      }
+      return count
+    }, this.behaviorData.interventionStage > 0 ? 1 : 0)
+
+    const analyticsData = {
+      domain: window.location.hostname,
+      siteType: this.sitePatterns.type,
+      timeOnPage: timeMinutes,
+      scrollTime: timeSeconds,
+      behaviorScore: this.behaviorScore,
+      flags: { ...this.behaviorData.flags } || {}, // Clone to avoid reference issues
+      scrollPauseCount: this.behaviorData.scrollPauseCount || 0,
+      contentPieces: this.behaviorData.contentPieces || 0,
+      interventionStage: this.behaviorData.interventionStage,
+      interventionCount,
+      rapidScrollCount: this.behaviorData.rapidScrollCount || 0,
+      backAndForthCount: this.behaviorData.backAndForthCount || 0,
+      passiveConsumptionTime: this.behaviorData.passiveConsumptionTime || 0,
+      focusMode: this.behaviorData.focusMode,
+      timestamp: Date.now(),
+      sessionStart: this.behaviorData.sessionStart
+    }
+
+    // Keep only the most recent analytics entries (prevent memory growth)
+    if (this.analyticsQueue.length > 10) {
+      this.analyticsQueue.shift()
+    }
+    
+    this.analyticsQueue.push(analyticsData)
+  }
+
+  /**
+   * Flush the analytics queue by sending batched data
+   */
+  flushAnalyticsQueue() {
+    if (!this.backgroundConnected || !this.contextValid || this.analyticsQueue.length === 0) {
+      return
+    }
+
+    try {
+      if (chrome.runtime.id) {
+        // Send the most recent analytics data
+        const latestData = this.analyticsQueue[this.analyticsQueue.length - 1]
+        
+        chrome.runtime.sendMessage({
+          type: 'BEHAVIORAL_EVENT',
+          data: latestData
+        }).catch(error => {
+          if (error.message.includes('Extension context invalidated')) {
+            this.contextValid = false
+          }
+        })
+        
+        // Clear the queue after successful send
+        this.analyticsQueue = []
+        this.lastAnalyticsFlush = Date.now()
+      }
+    } catch (error) {
+      // Background service not available, continue in standalone mode
+      console.warn('Failed to send analytics:', error.message)
+    }
+  }
+
+  /**
+   * Public interface - schedules a batched score update for better performance
+   */
   updateBehaviorScore () {
+    this.scheduleScoreUpdate()
+  }
+
+  /**
+   * Internal method that performs the actual score calculation
+   */
+  updateBehaviorScoreInternal () {
     let score = 0
     const timeMinutes = this.behaviorData.totalTimeOnPage / (1000 * 60)
 
@@ -1216,56 +2518,15 @@ class AttentionTrainerContent {
 
     // Clamp score between 0 and 100
     this.behaviorScore = Math.max(0, Math.min(score, 100))
-
-    // Send behavioral analytics to background service
-    this.sendBehavioralAnalytics()
-
-    // Trigger interventions based on score
-    this.checkInterventionTriggers()
   }
 
   checkInterventionTriggers () {
-    // Site-specific dynamic thresholds
-    const thresholds = {
-      social: { stage1: 25, stage2: 40, stage3: 60, stage4: 80 },
-      video: { stage1: 30, stage2: 50, stage3: 70, stage4: 85 },
-      forum: { stage1: 20, stage2: 35, stage3: 55, stage4: 75 },
-      microblog: { stage1: 25, stage2: 45, stage3: 65, stage4: 80 },
-      general: { stage1: 40, stage2: 60, stage3: 80, stage4: 90 }
-    }
-    const siteType = this.sitePatterns.type || 'general'
-    const interventionThresholds = thresholds[siteType]
-
+    // Override: Use time-based distraction tracking for stage decisions
     if (this.behaviorData.focusMode ||
         (this.behaviorData.snoozeUntil && Date.now() < this.behaviorData.snoozeUntil)) {
       return
     }
-
-    const now = Date.now()
-    const timeSinceLastIntervention = now - this.behaviorData.lastInterventionTime
-
-    // Minimum 30 seconds between interventions
-    if (timeSinceLastIntervention < 30000) {
-      return
-    }
-
-    let targetStage = 0
-
-    if (this.behaviorScore >= interventionThresholds.stage4) {
-      targetStage = 4
-    } else if (this.behaviorScore >= interventionThresholds.stage3) {
-      targetStage = 3
-    } else if (this.behaviorScore >= interventionThresholds.stage2) {
-      targetStage = 2
-    } else if (this.behaviorScore >= interventionThresholds.stage1) {
-      targetStage = 1
-    }
-
-    if (targetStage > 0 && targetStage !== this.behaviorData.interventionStage) {
-      console.log(`📊 Behavior score: ${Math.round(this.behaviorScore)} → Stage ${targetStage}`)
-      this.behaviorData.lastInterventionTime = now
-      this.triggerIntervention(targetStage, this.settings.focusMode || 'gentle')
-    }
+    this.evaluateTimeBasedStages(Date.now())
   }
 
   sendBehavioralAnalytics () {
@@ -1317,12 +2578,21 @@ class AttentionTrainerContent {
   }
 
   startBehaviorTracking () {
-    // Start continuous behavior analysis
-    setInterval(() => {
-      this.updateBehaviorScore()
+    // Start continuous behavior analysis using unified timer system
+    this.addTimerTask('behavior_tracking', () => {
+      if (!this.isDestroyed) {
+        this.updateBehaviorScore()
+      }
     }, 5000) // Update every 5 seconds
+    
+    // Add analytics flush timer to unified system
+    this.addTimerTask('analytics_flush', () => {
+      if (!this.isDestroyed && this.analyticsQueue.length > 0) {
+        this.flushAnalyticsQueue()
+      }
+    }, 30000) // Flush analytics every 30 seconds
 
-    console.log('🔄 Behavior tracking started')
+    console.log('🔄 Behavior tracking started with unified timer system')
   }
 
   resetScrollData () {
@@ -1359,7 +2629,8 @@ function initializeExtension () {
     // Add a small delay to ensure background script is fully loaded
     setTimeout(() => {
       try {
-        new AttentionTrainerContent()
+        const contentScript = new AttentionTrainerContent()
+        window.attentionTrainerContent = contentScript
       } catch (error) {
         console.error('Failed to initialize Attention Trainer content script:', error)
       }

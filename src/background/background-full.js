@@ -218,7 +218,7 @@ class AttentionTrainerBackground {
       }
 
       // Apply all pending updates
-      for (const [key, pending] of this.pendingStorageUpdates) {
+      for (const [_key, pending] of this.pendingStorageUpdates) {
         const domain = pending.domain
 
         if (!settings.analytics.dailyStats[today][domain]) {
@@ -268,7 +268,7 @@ class AttentionTrainerBackground {
     }
   }
 
-  async resetTabScrollData (tabId, url) {
+  async resetTabScrollData (tabId, _url) {
     chrome.tabs
       .sendMessage(tabId, {
         type: 'RESET_SCROLL_DATA'
@@ -344,4 +344,5 @@ class AttentionTrainerBackground {
 }
 
 // Initialize background service
-new AttentionTrainerBackground()
+const backgroundService = new AttentionTrainerBackground()
+export default backgroundService

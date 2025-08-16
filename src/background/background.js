@@ -1,6 +1,17 @@
 // Background service worker for Attention Trainer
 console.log('Attention Trainer background script loading...')
 
+// Load shared modules for error handling
+if (typeof importScripts !== 'undefined') {
+  try {
+    importScripts('/src/shared/logger.js')
+    importScripts('/src/shared/error-handler.js')
+    importScripts('/src/shared/error-boundary.js')
+  } catch (error) {
+    console.warn('Failed to load shared modules:', error)
+  }
+}
+
 // Keep service worker alive using multiple strategies
 let keepAliveInterval
 
@@ -35,46 +46,201 @@ class AttentionTrainerBackground {
     this.STORAGE_BATCH_DELAY = 1000 // Batch storage updates for 1 second
     this.DATA_RETENTION_DAYS = 90 // Keep data for 90 days
 
-    this.setupEventListeners()
-    this.initializeStorage()
+    // Initialize error handling
+    this.initializeErrorHandling()
+
+    // Set up with error boundaries
+    this.safeSetupEventListeners()
+    this.safeInitializeStorage()
 
     // Schedule periodic cleanup
     this.schedulePeriodicCleanup()
 
-    console.log('Attention Trainer background service initialized')
+    this.logger.info('Attention Trainer background service initialized')
   }
 
-  setupEventListeners () {
-    // Handle extension installation
-    chrome.runtime.onInstalled.addListener(() => {
-      this.initializeStorage()
+  /**
+   * Initialize error handling system
+   */
+  initializeErrorHandling() {
+    try {
+      // Initialize logger
+      this.logger = typeof logger !== 'undefined' 
+        ? logger.child({ component: 'Background' })
+        : { info: console.log, warn: console.warn, error: console.error, debug: console.debug }
+      
+      // Initialize error boundary
+      this.errorBoundary = typeof ErrorBoundary !== 'undefined'
+        ? new ErrorBoundary({
+            componentName: 'AttentionTrainerBackground',
+            telemetryEnabled: true,
+            circuitBreakerEnabled: true,
+            gracefulDegradation: true
+          })
+        : null
+        
+      if (this.errorBoundary) {
+        // Register recovery strategies specific to background script
+        this.registerRecoveryStrategies()
+        this.logger.info('Error boundary system initialized')
+      }
+    } catch (error) {
+      console.error('Failed to initialize error handling:', error)
+      // Fallback logging
+      this.logger = { info: console.log, warn: console.warn, error: console.error, debug: console.debug }
+    }
+  }
+
+  /**
+   * Register background-specific recovery strategies
+   */
+  registerRecoveryStrategies() {
+    if (!this.errorBoundary) return
+
+    // Storage operation recovery
+    this.errorBoundary.registerRecoveryStrategy('storage_operation', async (error, errorInfo, attempts) => {
+      this.logger.warn(`Storage recovery attempt ${attempts + 1}`, { error: error.message })
+      
+      try {
+        // Try to reinitialize storage with defaults
+        await this.initializeStorage()
+        return true
+      } catch (recoveryError) {
+        this.logger.error('Storage recovery failed', { error: recoveryError.message })
+        return false
+      }
     })
 
-    // Handle messages from content scripts
+    // Message handling recovery
+    this.errorBoundary.registerRecoveryStrategy('messaging_error', async (error, errorInfo, attempts) => {
+      this.logger.warn(`Message handling recovery attempt ${attempts + 1}`, { error: error.message })
+      
+      // For messaging errors, we typically can't recover the specific message
+      // but we can ensure the service remains stable
+      return true
+    })
+
+    // Tab communication recovery
+    this.errorBoundary.registerFallbackHandler('tab_communication', async (error, errorInfo) => {
+      this.logger.warn('Tab communication failed, using fallback', { error: error.message })
+      // Fallback: Continue operation without the specific tab communication
+      return { success: false, fallback: true }
+    })
+  }
+
+  /**
+   * Safe setup event listeners with error boundaries
+   */
+  safeSetupEventListeners() {
+    const setupWithBoundary = this.errorBoundary
+      ? this.errorBoundary.wrap('setupEventListeners', this.setupEventListeners.bind(this))
+      : this.setupEventListeners.bind(this)
+    
+    try {
+      setupWithBoundary()
+    } catch (error) {
+      this.logger.error('Failed to setup event listeners', { error: error.message })
+      // Continue with basic functionality
+    }
+  }
+
+  /**
+   * Safe initialize storage with error boundaries
+   */
+  safeInitializeStorage() {
+    const initWithBoundary = this.errorBoundary
+      ? this.errorBoundary.wrap('initializeStorage', this.initializeStorage.bind(this))
+      : this.initializeStorage.bind(this)
+    
+    initWithBoundary().catch(error => {
+      this.logger.error('Critical storage initialization failure', { error: error.message })
+      // Attempt minimal initialization
+      this.initializeMinimalStorage()
+    })
+  }
+
+  /**
+   * Setup event listeners with enhanced error handling
+   */
+  setupEventListeners () {
+    // Handle extension installation with error boundary
+    chrome.runtime.onInstalled.addListener(async (details) => {
+      try {
+        await this.handleInstallation(details)
+      } catch (error) {
+        this.logger.error('Installation handler failed', { error: error.message, details })
+        if (this.errorBoundary) {
+          await this.errorBoundary.handleError(error, { context: 'installation', details })
+        }
+      }
+    })
+
+    // Handle messages from content scripts with enhanced error handling
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      this.handleMessage(message, sender, sendResponse)
+      this.handleMessageWithBoundary(message, sender, sendResponse)
       return true // Keep message channel open for async response
     })
 
-    // Handle tab updates to reset scroll tracking
+    // Handle tab updates with error handling
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       if (changeInfo.status === 'complete' && tab.url) {
-        this.resetTabScrollData(tabId, tab.url)
+        this.handleTabUpdateSafely(tabId, changeInfo, tab)
+      }
+    })
+
+    // Add connection metrics handler
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message.type === 'CONNECTION_METRICS') {
+        this.handleConnectionMetrics(message.data, sender)
+        sendResponse({ success: true })
       }
     })
   }
 
   async initializeStorage () {
     try {
+      const defaultInterventionConfig = {
+        thresholdsMinutes: {
+          stage1Start: 0,
+          stage1To80End: 3,
+          stage1To50End: 10,
+          stage2Start: 10,
+          stage3Start: 12,
+          stage4Start: 15
+        },
+        brightness: {
+          start: 100,
+          at3min: 80,
+          at10min: 50,
+          transitionMs: 600,
+          easing: 'cubic-bezier(0.25,0.46,0.45,0.94)'
+        },
+        blur: {
+          stage2Px: 0.75,
+          maxPx: 1.0,
+          transitionMs: 800
+        },
+        debounceMs: 20000,
+        idleDetection: {
+          scrollIdleMs: 2000,
+          videoIdleGraceMs: 1000
+        },
+        persistence: {
+          perDomain: true,
+          carryOverSameDay: true
+        }
+      }
+
       const defaultSettings = {
         isEnabled: true,
         focusMode: 'gentle', // gentle, strict, gamified
         thresholds: {
-          stage1: 30, // seconds - subtle dimming after 30s of scrolling
-          stage2: 60, // seconds - progressive blur after 1 minute
-          stage3: 120, // seconds - nudge message after 2 minutes
-          stage4: 180 // seconds - final warning/scroll lock after 3 minutes
+          stage1: 30, // seconds - legacy (unused by new system)
+          stage2: 60,
+          stage3: 120,
+          stage4: 180
         },
+        interventionConfig: defaultInterventionConfig,
         whitelist: [],
         blacklist: [],
         analytics: {
@@ -91,6 +257,13 @@ class AttentionTrainerBackground {
 
       const stored = await chrome.storage.local.get(Object.keys(defaultSettings))
       const settings = { ...defaultSettings, ...stored }
+
+      // Ensure deep merge for interventionConfig
+      settings.interventionConfig = {
+        ...defaultInterventionConfig,
+        ...(stored.interventionConfig || {})
+      }
+
       await chrome.storage.local.set(settings)
       console.log('Storage initialized successfully')
     } catch (error) {
@@ -478,6 +651,188 @@ class AttentionTrainerBackground {
   }
 
   /**
+   * Handle installation with error boundaries
+   */
+  async handleInstallation(details) {
+    this.logger.info('Extension installation/update detected', details)
+    
+    try {
+      // Initialize or migrate storage
+      await this.initializeStorage()
+      
+      // Handle version upgrades
+      if (details.reason === 'update' && details.previousVersion) {
+        await this.handleVersionUpgrade(details.previousVersion)
+      }
+    } catch (error) {
+      this.logger.error('Installation handling failed', { error: error.message, details })
+      throw error
+    }
+  }
+
+  /**
+   * Handle version upgrades
+   */
+  async handleVersionUpgrade(previousVersion) {
+    try {
+      this.logger.info('Handling version upgrade', { from: previousVersion })
+      
+      // Add version-specific migration logic here
+      // For now, just ensure storage integrity
+      const storage = await chrome.storage.local.get()
+      await chrome.storage.local.set({
+        ...storage,
+        lastUpgrade: {
+          from: previousVersion,
+          to: chrome.runtime.getManifest().version,
+          timestamp: Date.now()
+        }
+      })
+    } catch (error) {
+      this.logger.error('Version upgrade handling failed', { error: error.message })
+    }
+  }
+
+  /**
+   * Handle messages with enhanced error boundaries
+   */
+  async handleMessageWithBoundary(message, sender, sendResponse) {
+    const messageHandler = this.errorBoundary
+      ? this.errorBoundary.wrapWithCircuitBreaker('handleMessage', this.handleMessage.bind(this))
+      : this.handleMessage.bind(this)
+    
+    try {
+      await messageHandler(message, sender, sendResponse)
+    } catch (error) {
+      this.logger.error('Message handling failed with circuit breaker', {
+        messageType: message.type,
+        error: error.message,
+        sender: sender?.tab?.url
+      })
+      
+      // Send error response
+      try {
+        sendResponse({ success: false, error: error.message, fallback: true })
+      } catch (responseError) {
+        this.logger.error('Failed to send error response', { error: responseError.message })
+      }
+    }
+  }
+
+  /**
+   * Handle tab updates safely
+   */
+  async handleTabUpdateSafely(tabId, changeInfo, tab) {
+    try {
+      await this.resetTabScrollData(tabId, tab.url)
+    } catch (error) {
+      this.logger.warn('Tab update handling failed', {
+        tabId,
+        url: tab.url,
+        error: error.message
+      })
+      
+      if (this.errorBoundary) {
+        await this.errorBoundary.handleError(error, {
+          context: 'tab_update',
+          tabId,
+          url: tab.url
+        })
+      }
+    }
+  }
+
+  /**
+   * Handle connection metrics from ConnectionManager
+   */
+  async handleConnectionMetrics(metrics, sender) {
+    try {
+      this.logger.debug('Received connection metrics', {
+        from: sender?.tab?.url || 'unknown',
+        metrics
+      })
+      
+      // Store metrics for analytics
+      const storage = await chrome.storage.local.get(['connectionMetrics'])
+      const connectionMetrics = storage.connectionMetrics || []
+      
+      connectionMetrics.push({
+        timestamp: Date.now(),
+        url: sender?.tab?.url || 'unknown',
+        metrics
+      })
+      
+      // Keep only last 100 metrics entries
+      if (connectionMetrics.length > 100) {
+        connectionMetrics.splice(0, connectionMetrics.length - 100)
+      }
+      
+      await chrome.storage.local.set({ connectionMetrics })
+    } catch (error) {
+      this.logger.error('Failed to handle connection metrics', { error: error.message })
+    }
+  }
+
+  /**
+   * Initialize minimal storage for fallback scenarios
+   */
+  async initializeMinimalStorage() {
+    try {
+      this.logger.warn('Initializing minimal storage fallback')
+      
+      const minimalSettings = {
+        isEnabled: true,
+        focusMode: 'gentle',
+        thresholds: {
+          stage1: 30,
+          stage2: 60,
+          stage3: 120,
+          stage4: 180
+        },
+        interventionConfig: {
+          thresholdsMinutes: {
+            stage1Start: 0,
+            stage1To80End: 3,
+            stage1To50End: 10,
+            stage2Start: 10,
+            stage3Start: 12,
+            stage4Start: 15
+          },
+          brightness: {
+            start: 100,
+            at3min: 80,
+            at10min: 50,
+            transitionMs: 600,
+            easing: 'cubic-bezier(0.25,0.46,0.45,0.94)'
+          },
+          blur: {
+            stage2Px: 0.75,
+            maxPx: 1.0,
+            transitionMs: 800
+          },
+          debounceMs: 20000,
+          idleDetection: {
+            scrollIdleMs: 2000,
+            videoIdleGraceMs: 1000
+          },
+          persistence: {
+            perDomain: true,
+            carryOverSameDay: true
+          }
+        },
+        whitelist: [],
+        analytics: { dailyStats: {}, interventions: [] }
+      }
+      
+      await chrome.storage.local.set(minimalSettings)
+      this.logger.info('Minimal storage initialized successfully')
+    } catch (error) {
+      this.logger.error('Even minimal storage initialization failed', { error: error.message })
+      // At this point, we can only log and hope for recovery
+    }
+  }
+
+  /**
    * Get health information for diagnostics
    */
   async getHealthInfo () {
@@ -492,10 +847,15 @@ class AttentionTrainerBackground {
         batchDelay: this.STORAGE_BATCH_DELAY,
         keepAliveActive: !!keepAliveInterval,
         lastCleanup: storage.lastCleanup || 'never',
-        uptime: Date.now() - (this.startTime || Date.now())
+        uptime: Date.now() - (this.startTime || Date.now()),
+        errorBoundary: this.errorBoundary ? this.errorBoundary.getStatus() : null,
+        logger: this.logger ? {
+          component: 'Background',
+          bufferSize: typeof this.logger.getBuffer === 'function' ? this.logger.getBuffer().length : 'unknown'
+        } : null
       }
     } catch (error) {
-      console.error('Error getting health info:', error)
+      this.logger.error('Error getting health info', { error: error.message })
       return {
         error: error.message,
         timestamp: Date.now()

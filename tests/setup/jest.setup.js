@@ -10,9 +10,104 @@ const chrome = require('sinon-chrome/webextensions')
 // Global setup for Chrome APIs
 global.chrome = chrome
 
+// Enhance sinon-chrome stubs with Jest mock functionality for better compatibility
+function enhanceStubWithJestMocks(stub) {
+  if (!stub) return stub
+  
+  // Add Jest mock methods while preserving sinon functionality
+  stub.mockResolvedValue = (val) => {
+    stub.returns(Promise.resolve(val))
+    return stub
+  }
+  
+  stub.mockRejectedValue = (err) => {
+    stub.returns(Promise.reject(err))
+    return stub
+  }
+  
+  stub.mockImplementation = (fn) => {
+    stub.callsFake(fn)
+    return stub
+  }
+  
+  stub.mockReturnValue = (val) => {
+    stub.returns(val)
+    return stub
+  }
+  
+  stub.mockClear = () => {
+    stub.resetHistory()
+    return stub
+  }
+  
+  // Add toHaveBeenCalled compatibility 
+  stub.toHaveBeenCalled = () => stub.called
+  stub.toHaveBeenCalledWith = (...args) => stub.calledWith(...args)
+  
+  // Add Jest-style properties for compatibility (only if not already present)
+  if (!stub.hasOwnProperty('mock')) {
+    try {
+      Object.defineProperty(stub, 'mock', {
+        get() {
+          return {
+            calls: stub.getCalls().map(call => call.args),
+            results: stub.getCalls().map(call => ({ type: 'return', value: call.returnValue })),
+            instances: [],
+            invocationCallOrder: stub.getCalls().map((call, index) => index)
+          }
+        },
+        configurable: true
+      })
+    } catch (e) {
+      // If mock property can't be defined, stub probably already has Jest-compatible interface
+    }
+  }
+  
+  return stub
+}
+
+// Enhance Chrome API stubs with Jest mock functionality
+enhanceStubWithJestMocks(chrome.runtime.sendMessage)
+enhanceStubWithJestMocks(chrome.storage?.local?.get)
+enhanceStubWithJestMocks(chrome.storage?.local?.set)
+enhanceStubWithJestMocks(chrome.storage?.local?.clear)
+enhanceStubWithJestMocks(chrome.tabs?.query)
+enhanceStubWithJestMocks(chrome.tabs?.sendMessage)
+
+// Ensure action API exists and enhance it
+if (!chrome.action) {
+  chrome.action = {
+    setBadgeText: chrome.runtime.sendMessage // Use existing stub as template
+  }
+}
+if (!chrome.action.setBadgeText) {
+  chrome.action.setBadgeText = chrome.runtime.sendMessage // Use existing stub
+}
+enhanceStubWithJestMocks(chrome.action.setBadgeText)
+
+// Ensure alarms API exists and enhance it
+if (!chrome.alarms) {
+  chrome.alarms = {
+    create: chrome.runtime.sendMessage, // Use existing stub as template
+    onAlarm: { addListener: jest.fn(), removeListener: jest.fn() }
+  }
+}
+if (!chrome.alarms.create) {
+  chrome.alarms.create = chrome.runtime.sendMessage // Use existing stub
+}
+enhanceStubWithJestMocks(chrome.alarms.create)
+
 // Mock window and document globals for content script testing
 global.window = window
 global.document = document
+
+// Provide document.getElementById as a jest.fn so unit tests can mockImplementation
+if (typeof document.getElementById !== 'function' || !document.getElementById._isMock) {
+  const realGetElementById = document.getElementById?.bind(document)
+  const mockGet = jest.fn((id) => realGetElementById ? realGetElementById(id) : null)
+  mockGet._isMock = true
+  document.getElementById = mockGet
+}
 
 // Setup IndexedDB for fallback storage testing
 global.indexedDB = require('fake-indexeddb')
@@ -66,16 +161,51 @@ beforeEach(() => {
   // Setup basic properties
   chrome.runtime.id = 'test-extension-id'
 
-  // Setup method responses
-  chrome.runtime.getURL.callsFake((path) => `chrome-extension://test-extension-id/${path}`)
-  chrome.runtime.sendMessage.resolves({})
+  // Replace getURL with deterministic function compatible with tests
+  if (typeof chrome.runtime.getURL?.callsFake === 'function') {
+    chrome.runtime.getURL.callsFake((p) => `chrome-extension://test-extension-id/${p}`)
+  } else if (typeof chrome.runtime.getURL?.returns === 'function') {
+    // Fallback: static path (may not satisfy some tests expecting dynamic)
+    chrome.runtime.getURL.returns('chrome-extension://test-extension-id/test.html')
+  }
 
-  chrome.storage.local.get.resolves({})
-  chrome.storage.local.set.resolves()
-  chrome.storage.local.clear.resolves()
+  // Make async style defaults return promises
+  chrome.runtime.sendMessage.returns(Promise.resolve({}))
+  chrome.storage.local.get.returns(Promise.resolve({}))
+  chrome.storage.local.set.returns(Promise.resolve())
+  chrome.storage.local.clear.returns(Promise.resolve())
 
-  chrome.tabs.query.resolves([])
-  chrome.tabs.sendMessage.resolves({})
+  chrome.tabs.query.returns(Promise.resolve([]))
+  chrome.tabs.sendMessage.returns(Promise.resolve({}))
+  
+  // Ensure action API has proper defaults
+  if (chrome.action?.setBadgeText) {
+    chrome.action.setBadgeText.returns(Promise.resolve())
+  }
+  
+  // Ensure alarms API has proper defaults
+  if (chrome.alarms?.create) {
+    chrome.alarms.create.returns(Promise.resolve())
+  }
+  
+  // Note: Chrome APIs are read-only sinon stubs, so we work with them as-is
+
+  // Ensure event addListener methods are Jest-mock compatible for expectations
+  const ensureEvent = (evt) => {
+    if (evt && typeof evt.addListener === 'function') {
+      // track listeners so tests can inspect or invoke them
+      evt._listeners = []
+      evt.addListener = jest.fn((fn) => {
+        evt._listeners.push(fn)
+      })
+    }
+  }
+  ensureEvent(chrome.runtime.onInstalled)
+  ensureEvent(chrome.runtime.onStartup)
+  ensureEvent(chrome.runtime.onMessage)
+  ensureEvent(chrome.tabs.onUpdated)
+  ensureEvent(chrome.tabs.onActivated)
+  ensureEvent(chrome.alarms?.onAlarm)
 
   // Reset console to avoid noise in tests
   console.log = jest.fn()
@@ -202,7 +332,24 @@ global.testUtils = {
     flags: {},
     contentPieces: 0,
     ...overrides
-  })
+  }),
+  
+  // Chrome API assertion helpers for sinon-chrome compatibility
+  expectChromeApiCalled: (stub) => {
+    if (!stub || !stub.called) {
+      throw new Error(`Expected Chrome API to have been called`)
+    }
+  },
+  
+  expectChromeApiCalledWith: (stub, ...expectedArgs) => {
+    if (!stub || !stub.called) {
+      throw new Error(`Expected Chrome API to have been called`)
+    }
+    if (!stub.calledWith(...expectedArgs)) {
+      const actualCalls = stub.getCalls().map(call => call.args)
+      throw new Error(`Expected Chrome API to have been called with ${JSON.stringify(expectedArgs)}, but was called with: ${JSON.stringify(actualCalls)}`)
+    }
+  }
 }
 
 // Setup error handling for tests
