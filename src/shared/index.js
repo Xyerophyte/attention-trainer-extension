@@ -186,7 +186,7 @@ const moduleLoader = {
       getSettings: async () => {
         console.log('⚙️ Settings retrieval not available (fallback mode)')
         return {
-          isEnabled: false,
+          isEnabled: true, // Enable by default in fallback mode
           focusMode: 'gentle',
           thresholds: { stage1: 30, stage2: 60, stage3: 120, stage4: 180 },
           whitelist: []

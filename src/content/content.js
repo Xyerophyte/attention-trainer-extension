@@ -160,6 +160,12 @@ class AttentionTrainerContent {
     // Scroll activity marker (passive)
     const onScroll = () => {
       this.distractionState.lastScrollTs = Date.now()
+      // Mark scrolling as started on first scroll
+      if (!this.behaviorData.scrollingStarted) {
+        console.log('🔄 Scrolling started - initializing time tracking')
+        this.behaviorData.scrollingStarted = true
+        this.behaviorData.actualScrollStartTime = Date.now()
+      }
     }
     window.addEventListener('scroll', onScroll, { passive: true })
 
@@ -170,8 +176,19 @@ class AttentionTrainerContent {
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
         this.distractionState.lastActiveTs = Date.now() // mark now to avoid jumps
+      } else if (document.visibilityState === 'visible') {
+        // Update last scroll time on visibility change to visible
+        this.distractionState.lastScrollTs = Date.now()
       }
     })
+
+    // Force-initialize tracking - don't wait for first scroll
+    if (!this.behaviorData.scrollingStarted) {
+      console.log('🔄 Force-initializing time tracking')
+      this.behaviorData.scrollingStarted = true
+      this.behaviorData.actualScrollStartTime = Date.now()
+      this.distractionState.lastScrollTs = Date.now()
+    }
 
     // Main 1s tick to accumulate active time, drive brightness and stage
     this.addTimerTask('distraction_tick', () => {
@@ -184,6 +201,11 @@ class AttentionTrainerContent {
           this.updateBrightnessForTime(this.distractionState.activeMs)
           // Stage computation and transitions
           this.evaluateTimeBasedStages(now)
+
+          // Debug logging - log every 5 seconds
+          if (this.distractionState.activeMs % 5000 === 0) {
+            console.log(`⏱️ Active time: ${this.distractionState.activeMs/1000}s, brightness: ${this.brightnessState.currentPercent}%, stage: ${this.distractionState.stage}`)
+          }
         }
       } catch (e) {
         console.warn('Distraction tick error:', e)
@@ -197,13 +219,24 @@ class AttentionTrainerContent {
   }
 
   isDistractionActive(nowTs = Date.now()) {
-    // Active if: recent scroll (within idle window) OR any media playing, and tab visible
+    // Always active if tab is visible (remove dependency on scrolling)
+    const visible = document.visibilityState === 'visible'
+    
+    // Optional: Check for recent activity but don't require it
     const cfg = this.getInterventionConfig()
     const scrollIdleMs = cfg?.idleDetection?.scrollIdleMs ?? 2000
-    const visible = document.visibilityState === 'visible'
     const recentScroll = nowTs - (this.distractionState.lastScrollTs || 0) <= scrollIdleMs
     const media = !!this.distractionState.mediaPlaying
-    return visible && (recentScroll || media)
+    const hasActivity = recentScroll || media
+    
+    // For the first 60 seconds, always consider active if visible
+    // After that, require some activity or media playing
+    const sessionAge = nowTs - this.behaviorData.sessionStart
+    if (sessionAge < 60000) { // First 60 seconds
+      return visible
+    }
+    
+    return visible && hasActivity
   }
 
   trackMediaActivity() {
@@ -252,10 +285,14 @@ class AttentionTrainerContent {
   async persistDistractionTime() {
     try {
       const key = this.distractionState.persistenceKey
-      if (!key || !chrome?.storage?.local) return
+      if (!key || !chrome?.storage?.local || !chrome?.runtime?.id) {
+        // Fail silently if no Chrome APIs available
+        return
+      }
       await chrome.storage.local.set({ [key]: { activeMs: this.distractionState.activeMs, ts: Date.now() } })
     } catch (e) {
-      console.warn('Persist distraction time failed:', e?.message || e)
+      // Fail silently - context invalidation is common and non-critical
+      // console.warn('Persist distraction time failed:', e?.message || e)
     }
   }
 
@@ -281,6 +318,10 @@ class AttentionTrainerContent {
   }
 
   evaluateTimeBasedStages(nowTs = Date.now(), force = false) {
+    // Add debug logging every time this is called
+    const activeMinutes = Math.round(this.distractionState.activeMs / 60000 * 100) / 100;
+    console.log(`🔍 evaluateTimeBasedStages called: active=${activeMinutes}min, current_stage=${this.distractionState.stage}`);
+    
     // Check if focus mode or snooze is active - exit early if so
     if (this.behaviorData.focusMode || 
         (this.behaviorData.snoozeUntil && nowTs < this.behaviorData.snoozeUntil)) {
@@ -288,14 +329,37 @@ class AttentionTrainerContent {
       return
     }
 
+    // Check if extension is enabled - be more lenient
+    if (this.settings?.isEnabled === false) {
+      console.log('⏸️ Interventions blocked - extension is disabled')
+      return
+    }
+    
+    // Log if settings exist at all
+    if (!this.settings || Object.keys(this.settings).length === 0) {
+      console.log('⚠️ No settings loaded - assuming enabled for testing');
+      // Force enable for testing when no settings available
+      this.settings = { isEnabled: true, focusMode: 'gentle' };
+    } else {
+      console.log(`🔧 Settings loaded: enabled=${this.settings.isEnabled}, hasWhitelist=${!!this.settings.whitelist}`);
+    }
+
+    // Check if site is whitelisted
+    const domain = window.location.hostname
+    if (this.settings?.whitelist && Array.isArray(this.settings.whitelist) && 
+        this.settings.whitelist.includes(domain)) {
+      console.log(`⏸️ Interventions blocked - site ${domain} is whitelisted`)
+      return
+    }
+
     const cfg = this.getInterventionConfig()
     const minutesCfg = cfg?.thresholdsMinutes || {
       stage1Start: 0,
-      stage1To80End: 3,
-      stage1To50End: 10,
-      stage2Start: 10,
-      stage3Start: 12,
-      stage4Start: 15
+      stage1To80End: 0.5, // 30 seconds
+      stage1To50End: 2,    // 2 minutes
+      stage2Start: 0.25,   // 15 seconds for testing
+      stage3Start: 0.5,    // 30 seconds for testing
+      stage4Start: 1       // 1 minute for testing
     }
     const debounceMs = cfg?.debounceMs ?? 20000
 
@@ -306,13 +370,31 @@ class AttentionTrainerContent {
     else if (ms >= minutesCfg.stage2Start * 60000) nextStage = 2
     else if (ms >= minutesCfg.stage1Start * 60000) nextStage = 1
 
+    // Log stage evaluation for debugging
+    if (nextStage > 0 && nextStage !== this.distractionState.stage) {
+      console.log(`🎯 Evaluating interventions: active_ms=${ms}, threshold=${minutesCfg.stage1Start * 60000}ms, next_stage=${nextStage}, current_stage=${this.distractionState.stage}`)
+    }
+
     if (nextStage !== this.distractionState.stage) {
       const sinceLast = nowTs - (this.distractionState.lastStageChangeTs || 0)
       if (force || sinceLast >= debounceMs) {
+        console.log(`⚡ Stage change: ${this.distractionState.stage} -> ${nextStage} (active time: ${ms/1000}s)`)
         this.distractionState.stage = nextStage
         this.distractionState.lastStageChangeTs = nowTs
         if (nextStage > 0) {
           this.triggerIntervention(nextStage, this.settings.focusMode || 'gentle')
+          
+          // Also send intervention event to background script for analytics
+          if (this.backgroundConnected && this.contextValid) {
+            try {
+              chrome.runtime.sendMessage({
+                type: 'INTERVENTION_TRIGGERED',
+                data: { stage: nextStage, timestamp: Date.now(), domain: domain }
+              }).catch(error => console.warn('Failed to log intervention:', error))
+            } catch (error) {
+              console.warn('Failed to send intervention event:', error)
+            }
+          }
         }
       }
     }
@@ -647,24 +729,35 @@ class AttentionTrainerContent {
 
   async init () {
     try {
-      // Initialize shared modules first
-      await this.initializeSharedModules()
-
-      await this.loadSettings()
-      this.setupBehavioralAnalysis()
-      this.setupMessageListener()
+      // Initialize core functionality immediately - don't wait for shared modules
       this.createInterventionElements()
       this.initBrightnessController()
       this.setupDistractionTracking()
+      this.setupMessageListener()
+      
+      // Start tracking immediately - don't wait for user interaction
+      console.log('🎯 Attention Trainer starting immediately')
+      
+      // Load settings with fallback
+      await this.loadSettings()
+      
+      // Initialize shared modules in parallel (non-blocking)
+      this.initializeSharedModules().catch(error => {
+        console.warn('Shared modules failed to load, continuing in standalone mode:', error)
+        this.backgroundConnected = false
+      })
+      
+      // Start behavioral analysis with immediate tracking
+      this.setupBehavioralAnalysis()
       this.startBehaviorTracking()
 
       console.log(`🎯 Attention Trainer initialized for ${this.sitePatterns.type} site`)
     } catch (error) {
-      if (this.errorHandler) {
-        this.errorHandler.handleError(error, { context: 'content_init' })
-      } else {
-        console.error('Failed to initialize Attention Trainer:', error)
-      }
+      console.error('Failed to initialize Attention Trainer:', error)
+      // Continue with basic functionality even on error
+      this.createInterventionElements()
+      this.initBrightnessController()
+      this.setupDistractionTracking()
     }
   }
 
