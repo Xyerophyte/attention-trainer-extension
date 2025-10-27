@@ -90,7 +90,7 @@ jobs:
         echo "✅ Bundle size check passed: $BUNDLE_SIZE bytes"
         
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v5
       with:
         name: extension-build-${{ github.sha }}
         path: dist/
@@ -129,7 +129,7 @@ jobs:
         EXTENSION_PATH: ./dist
         
     - name: Upload E2E test results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v5
       if: always()
       with:
         name: e2e-test-results
